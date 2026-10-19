@@ -11,6 +11,7 @@ export type TaskCommandEvent =
       estimatedTimeRemainingSec?: number
       navigationTimeSec?: number
       numberOfRecoveries?: number
+      posesRemaining?: number
     }
   | {
       type: 'status' | 'result'
@@ -38,6 +39,13 @@ export interface NavigateTaskCommand {
   targetPose: TaskTargetPose
 }
 
+export interface NavigateThroughPosesTaskCommand {
+  taskId: string
+  taskType: RuntimeTaskType
+  targetNames: string[]
+  targetPoses: TaskTargetPose[]
+}
+
 export interface TaskControlCommand {
   taskId: string
 }
@@ -50,6 +58,9 @@ export interface TaskCommandResult {
 
 export interface TaskCommandClient {
   sendNavigateToPose(command: NavigateTaskCommand): Promise<TaskCommandResult>
+  sendNavigateThroughPoses(
+    command: NavigateThroughPosesTaskCommand,
+  ): Promise<TaskCommandResult>
   pauseTask(command: TaskControlCommand): Promise<TaskCommandResult>
   resumeTask(command: NavigateTaskCommand): Promise<TaskCommandResult>
   cancelTask(command: TaskControlCommand): Promise<TaskCommandResult>
@@ -144,6 +155,14 @@ class MockTaskCommandClient implements TaskCommandClient {
     }
   }
 
+  async sendNavigateThroughPoses(command: NavigateThroughPosesTaskCommand) {
+    return {
+      accepted: true,
+      goalId: `mock-${command.taskId}`,
+      message: `Mock NavigateThroughPoses accepted: ${command.targetNames.join(' -> ')}`,
+    }
+  }
+
   async pauseTask(command: TaskControlCommand) {
     return {
       accepted: true,
@@ -176,7 +195,7 @@ class MockTaskCommandClient implements TaskCommandClient {
 class RosbridgeTaskCommandClient implements TaskCommandClient {
   private socket: WebSocket | null = null
   private openingSocket: Promise<WebSocket> | null = null
-  private goalIds = new Map<string, string>()
+  private goals = new Map<string, { goalId: string; action: string }>()
   private taskIdsByGoalId = new Map<string, string>()
   private listeners = new Set<TaskCommandEventListener>()
 
@@ -215,7 +234,7 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
       }),
     )
 
-    this.goalIds.set(command.taskId, goalId)
+    this.goals.set(command.taskId, { goalId, action })
     this.taskIdsByGoalId.set(goalId, command.taskId)
     this.emit({
       type: 'status',
@@ -232,6 +251,64 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
     }
   }
 
+  async sendNavigateThroughPoses(command: NavigateThroughPosesTaskCommand) {
+    if (command.targetPoses.length < 2) {
+      throw new Error('多点巡航至少需要两个目标点')
+    }
+
+    const socket = await this.ensureSocket()
+    const action = trimTrailingSlashes(
+      runtimeApiConfig.rosCommands.navigateThroughPosesActionName,
+    )
+    const goalId = createActionGoalId(command.taskId)
+
+    socket.send(
+      JSON.stringify({
+        op: 'send_action_goal',
+        id: goalId,
+        action,
+        action_type: 'nav2_msgs/action/NavigateThroughPoses',
+        feedback: true,
+        args: {
+          poses: command.targetPoses.map((targetPose) => ({
+            header: {
+              frame_id: targetPose.frameId,
+              stamp: {
+                sec: 0,
+                nanosec: 0,
+              },
+            },
+            pose: {
+              position: {
+                x: targetPose.x,
+                y: targetPose.y,
+                z: 0,
+              },
+              orientation: quaternionFromYaw(targetPose.yawRad),
+            },
+          })),
+          behavior_tree: '',
+        },
+      }),
+    )
+
+    this.goals.set(command.taskId, { goalId, action })
+    this.taskIdsByGoalId.set(goalId, command.taskId)
+    this.emit({
+      type: 'status',
+      taskId: command.taskId,
+      goalId,
+      status: 'running',
+      feedback: `多点巡航目标已发送，共 ${command.targetPoses.length} 个航点。`,
+    })
+
+    return {
+      accepted: true,
+      goalId,
+      message: `巡航路线 ${command.targetNames.join(' -> ')} 已发送`,
+    }
+  }
+
   async pauseTask(command: TaskControlCommand) {
     return this.cancelTask({
       taskId: command.taskId,
@@ -243,26 +320,25 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
   }
 
   async cancelTask(command: TaskControlCommand) {
-    const goalId = this.goalIds.get(command.taskId)
+    const goal = this.goals.get(command.taskId)
 
-    if (!goalId) {
+    if (!goal) {
       throw new Error(`未找到任务 ${command.taskId} 对应的 Nav2 goal，无法取消`)
     }
 
     const socket = await this.ensureSocket()
-    const action = trimTrailingSlashes(runtimeApiConfig.rosCommands.navigateActionName)
     socket.send(
       JSON.stringify({
         op: 'cancel_action_goal',
-        id: goalId,
-        action,
+        id: goal.goalId,
+        action: goal.action,
       }),
     )
-    this.goalIds.delete(command.taskId)
+    this.goals.delete(command.taskId)
 
     return {
       accepted: true,
-      goalId,
+      goalId: goal.goalId,
       message: 'Nav2 goal 取消请求已发送',
     }
   }
@@ -364,6 +440,7 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
       estimatedTimeRemainingSec: durationSec(feedback.estimated_time_remaining),
       navigationTimeSec: durationSec(feedback.navigation_time),
       numberOfRecoveries: readNumber(feedback.number_of_recoveries),
+      posesRemaining: readNumber(feedback.number_of_poses_remaining),
     })
   }
 
@@ -391,7 +468,7 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
         ? payload.values
         : undefined
 
-    this.goalIds.delete(taskId)
+    this.goals.delete(taskId)
     this.taskIdsByGoalId.delete(goalId)
     this.emit({
       type: 'result',

@@ -135,7 +135,7 @@ function toOverviewMapSnapshot(runtime: RuntimeDashboardSnapshot): OverviewMapSn
   return {
     name: runtime.map.name,
     occupancyGrid: runtime.map.occupancyGrid,
-    robotVisible: runtime.localization === 'ready',
+    robotVisible: runtime.map.robotPoseReceived !== false,
     robotXPercent: toPercent(robotPose.x, runtime.map.width),
     robotYPercent: toPercent(robotPose.y, runtime.map.height),
     robotYawDeg: robotPose.rotationDeg,
@@ -199,6 +199,7 @@ export function toMapDashboardSnapshot(runtime: RuntimeDashboardSnapshot): MapDa
     targets: runtime.map.targets.map((point) => toMapPoint(point, transform)),
     activeTargetId: runtime.map.activeTargetId,
     robotPose: rosPoseToCanvasPose(runtime.map.robotPose, transform),
+    robotVisible: runtime.map.robotPoseReceived !== false,
     logs: runtime.logs.map(toMapLogEntry),
   }
 }

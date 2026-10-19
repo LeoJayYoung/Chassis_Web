@@ -23,6 +23,7 @@ const props = defineProps<{
   selectionMode?: boolean
   draftTarget?: MapPoint
   showRobot?: boolean
+  selectedTargetIds?: string[]
 }>()
 
 const emit = defineEmits<{
@@ -397,9 +398,36 @@ function addRoute(group: Konva.Group) {
 
 function addGoals(group: Konva.Group) {
   const symbolScale = mapSymbolScale()
+  const selectedTargets = (props.selectedTargetIds ?? []).flatMap((targetId) => {
+    const target = props.scene.targets.find((item) => item.id === targetId)
+
+    return target ? [target] : []
+  })
+
+  if (selectedTargets.length) {
+    group.add(
+      new Konva.Line({
+        points: [
+          props.robotPose.x,
+          props.robotPose.y,
+          ...selectedTargets.flatMap((target) => [target.x, target.y]),
+        ],
+        stroke: themeColors.primary,
+        strokeWidth: 3,
+        dash: [10, 8],
+        lineCap: 'round',
+        lineJoin: 'round',
+        strokeScaleEnabled: false,
+        listening: false,
+        opacity: 0.8,
+      }),
+    )
+  }
 
   for (const target of props.scene.targets) {
-    const isActive = target.id === props.scene.activeTargetId
+    const selectionIndex = props.selectedTargetIds?.indexOf(target.id) ?? -1
+    const isCruiseTarget = selectionIndex >= 0
+    const isActive = target.id === props.scene.activeTargetId || isCruiseTarget
     const color = isActive ? themeColors.primary : themeColors.muted
 
     const point = new Konva.Group({
@@ -435,6 +463,22 @@ function addGoals(group: Konva.Group) {
         strokeScaleEnabled: false,
       }),
     )
+
+    if (isCruiseTarget) {
+      point.add(
+        new Konva.Text({
+          x: -7 * symbolScale,
+          y: -9 * symbolScale,
+          width: 14 * symbolScale,
+          text: String(selectionIndex + 1),
+          align: 'center',
+          fill: themeColors.sidebar,
+          fontSize: 12 * symbolScale,
+          fontStyle: '700',
+          listening: false,
+        }),
+      )
+    }
 
     point.add(
       new Konva.Text({
@@ -649,7 +693,13 @@ function mountKonva() {
 }
 
 watch(
-  () => [props.robotPose, props.scene, props.selectionMode, props.draftTarget],
+  () => [
+    props.robotPose,
+    props.scene,
+    props.selectionMode,
+    props.draftTarget,
+    props.selectedTargetIds,
+  ],
   () => {
     buildScene()
   },

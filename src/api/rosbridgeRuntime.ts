@@ -66,7 +66,7 @@ function createRosbridgeSnapshot(): RuntimeDashboardSnapshot {
 
   return {
     ...snapshot,
-    localization: 'lost',
+    localization: 'initializing',
     task: {
       ...snapshot.task,
       id: 'TASK-0000',
@@ -79,6 +79,7 @@ function createRosbridgeSnapshot(): RuntimeDashboardSnapshot {
     },
     map: {
       ...snapshot.map,
+      robotPoseReceived: false,
       activeTargetId: undefined,
       draftTarget: undefined,
       targets: [],
@@ -410,6 +411,7 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
           map: {
             ...this.snapshot.map,
             robotPose: normalized.value,
+            robotPoseReceived: true,
           },
         }
         break
@@ -455,8 +457,9 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
         this.snapshot = {
           ...this.snapshot,
           localization:
+            !this.snapshot.map.robotPoseReceived ||
             this.snapshot.localization === 'lost'
-              ? 'lost'
+              ? this.snapshot.localization
               : inferLocalizationStatus([...this.tfFrames.values()]),
           telemetry: {
             ...this.ensureTelemetry(),

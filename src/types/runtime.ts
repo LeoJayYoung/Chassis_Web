@@ -193,6 +193,7 @@ export interface RuntimeMapSnapshot {
   activeTargetId?: string
   draftTarget?: RuntimeMapPoint
   robotPose: RuntimeRobotPose
+  robotPoseReceived?: boolean
   targets: RuntimeMapPoint[]
   routePoints: RuntimePathPoint[]
   obstacles: RuntimeMapObstacle[]
@@ -206,6 +207,7 @@ export interface RuntimeTaskState {
   status: RuntimeTaskStatus
   feedback: string
   targetPointId?: string
+  targetPointIds?: string[]
   progressPercent: number
   etaMinutes: number
 }
@@ -235,6 +237,7 @@ export interface RuntimeTaskRecord {
   dispatchMode?: RuntimeTaskDispatchMode
   schedule?: RuntimeTaskSchedule
   targetPointId?: string
+  targetPointIds?: string[]
   createdTime: string
   completedTime: string | null
   progressPercent: number

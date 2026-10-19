@@ -7,6 +7,8 @@ const clients = new Set()
 const subscriptions = new Map()
 const actionGoals = new Map()
 const ACTION_NAME = process.env.MOCK_NAVIGATE_ACTION_NAME || '/navigate_to_pose'
+const THROUGH_POSES_ACTION_NAME =
+  process.env.MOCK_NAVIGATE_THROUGH_POSES_ACTION_NAME || '/navigate_through_poses'
 
 let currentPose = {
   x: -1.55,
@@ -158,6 +160,9 @@ function actionFeedbackMessage(goal) {
         nanosec: Math.floor((elapsedSec % 1) * 1_000_000_000),
       },
       number_of_recoveries: 0,
+      number_of_poses_remaining: goal.targets
+        ? Math.max(0, Math.ceil((1 - goal.progress) * goal.targets.length))
+        : 0,
     },
   }
 }
@@ -172,7 +177,7 @@ function publishActionFeedback(goal) {
     sendJson(goal.socket, {
       op: 'action_feedback',
       id: goal.key,
-      action: ACTION_NAME,
+      action: goal.actionName,
       values: actionFeedbackMessage(goal).feedback,
     })
     return
@@ -189,7 +194,7 @@ function sendNativeActionResult(goal) {
   sendJson(goal.socket, {
     op: 'action_result',
     id: goal.key,
-    action: ACTION_NAME,
+    action: goal.actionName,
     status: goal.resultStatus,
     result: succeeded,
     values: succeeded
@@ -532,39 +537,58 @@ function handleRosbridgeMessage(socket, raw) {
 }
 
 function handleNativeActionGoal(socket, message) {
-  if (message.action !== ACTION_NAME) {
+  const isNavigateToPose =
+    message.action === ACTION_NAME &&
+    message.action_type === 'nav2_msgs/action/NavigateToPose'
+  const isNavigateThroughPoses =
+    message.action === THROUGH_POSES_ACTION_NAME &&
+    message.action_type === 'nav2_msgs/action/NavigateThroughPoses'
+
+  if (!isNavigateToPose && !isNavigateThroughPoses) {
     sendJson(socket, {
       op: 'action_result',
       id: message.id,
       action: message.action,
       status: 6,
       result: false,
-      values: `未找到 Action：${message.action}`,
+      values: `不支持的 Action：${message.action} (${message.action_type})`,
     })
     return
   }
 
-  if (message.action_type !== 'nav2_msgs/action/NavigateToPose') {
+  const targets = isNavigateThroughPoses
+    ? (message.args?.poses ?? []).map((pose) => ({
+        x: Number(pose?.pose?.position?.x) || 0,
+        y: Number(pose?.pose?.position?.y) || 0,
+      }))
+    : [
+        {
+          x: Number(message.args?.pose?.pose?.position?.x) || 0,
+          y: Number(message.args?.pose?.pose?.position?.y) || 0,
+        },
+      ]
+
+  if (isNavigateThroughPoses && targets.length < 2) {
     sendJson(socket, {
       op: 'action_result',
       id: message.id,
       action: message.action,
       status: 6,
       result: false,
-      values: `不支持的 Action 类型：${message.action_type}`,
+      values: '多点巡航至少需要两个目标点',
     })
     return
   }
 
-  const position = message.args?.pose?.pose?.position ?? {}
-  const target = {
-    x: Number(position.x) || 0,
-    y: Number(position.y) || 0,
-  }
+  const target = targets.at(-1)
+  const route = isNavigateThroughPoses
+    ? removeDuplicateRoutePoints([{ x: currentPose.x, y: currentPose.y }, ...targets])
+    : createActionRoute(currentPose, target)
   const goal = {
     key: String(message.id),
     target,
-    route: createActionRoute(currentPose, target),
+    targets,
+    route,
     status: 1,
     progress: 0,
     startedAt: Date.now(),
@@ -573,10 +597,15 @@ function handleNativeActionGoal(socket, message) {
     resultSent: false,
     protocol: 'native',
     socket,
+    actionName: message.action,
   }
 
   actionGoals.set(goal.key, goal)
-  console.log(`[mock-rosbridge] action goal ${goal.key} -> (${target.x}, ${target.y})`)
+  console.log(
+    `[mock-rosbridge] action goal ${goal.key} -> ${targets
+      .map((item) => `(${item.x}, ${item.y})`)
+      .join(' -> ')}`,
+  )
 }
 
 function handleNativeActionCancel(socket, message) {

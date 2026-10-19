@@ -88,5 +88,6 @@ export interface MapDashboardSnapshot {
   activeTargetId?: string
   targetDraft?: MapPoint
   robotPose: RobotPose
+  robotVisible: boolean
   logs: MapLogEntry[]
 }

@@ -19,7 +19,11 @@ import type {
   RuntimeTaskTimelineStatus,
   RuntimeTaskType,
 } from '../types'
-import type { NavigateTaskCommand, TaskCommandEvent } from '../api'
+import type {
+  NavigateTaskCommand,
+  NavigateThroughPosesTaskCommand,
+  TaskCommandEvent,
+} from '../api'
 
 const MOCK_POSE_TICK_MS = 500
 const MOCK_LOOP_TICKS = 80
@@ -36,6 +40,7 @@ const terminalTaskStatuses: RuntimeTaskStatus[] = ['completed', 'failed', 'cance
 export interface CreateTaskInput {
   type: RuntimeTaskType
   targetPointId?: string
+  targetPointIds?: string[]
   dispatchMode?: 'immediate' | 'scheduled'
   scheduledAt?: number
 }
@@ -82,6 +87,7 @@ function taskStateFromRecord(record: RuntimeTaskRecord): RuntimeTaskState {
     status: record.status,
     feedback: record.feedback ?? '暂无任务反馈',
     targetPointId: record.targetPointId,
+    targetPointIds: record.targetPointIds,
     progressPercent: record.progressPercent,
     etaMinutes: record.etaMinutes,
   }
@@ -130,6 +136,8 @@ function mergeRosbridgeSnapshot(
       ros: incoming.map.ros,
       occupancyGrid: incoming.map.occupancyGrid ?? current.map.occupancyGrid,
       robotPose: incoming.map.robotPose,
+      robotPoseReceived:
+        incoming.map.robotPoseReceived ?? current.map.robotPoseReceived,
       routePoints: incoming.map.routePoints,
     },
   }
@@ -381,7 +389,9 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     if (!target) return false
 
     const referencedByActiveTask = runtime.value.tasks.some(
-      (task) => task.targetPointId === targetId && !terminalTaskStatuses.includes(task.status),
+      (task) =>
+        (task.targetPointId === targetId || task.targetPointIds?.includes(targetId)) &&
+        !terminalTaskStatuses.includes(task.status),
     )
 
     if (referencedByActiveTask) {
@@ -407,16 +417,22 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
   }
 
   function setRouteToTarget(targetId?: string) {
-    const target = targetId
-      ? runtime.value.map.targets.find((item) => item.id === targetId)
-      : undefined
+    setRouteToTargets(targetId ? [targetId] : [])
+  }
 
-    if (!target) return
+  function setRouteToTargets(targetIds: string[]) {
+    const targets = targetIds.flatMap((targetId) => {
+      const target = runtime.value.map.targets.find((item) => item.id === targetId)
+
+      return target ? [target] : []
+    })
+
+    if (!targets.length) return
 
     const robotPose = runtime.value.map.robotPose
     const routePoints: RuntimePathPoint[] = [
       { x: robotPose.x, y: robotPose.y },
-      { x: target.x, y: target.y },
+      ...targets.map((target) => ({ x: target.x, y: target.y })),
     ]
 
     runtime.value = {
@@ -424,7 +440,7 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       map: {
         ...runtime.value.map,
         routePoints,
-        activeTargetId: targetId,
+        activeTargetId: targets.at(-1)?.id,
       },
     }
     mockPoseTick = Math.round(
@@ -568,6 +584,10 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       parts.push(`恢复 ${event.numberOfRecoveries} 次`)
     }
 
+    if (event.posesRemaining !== undefined) {
+      parts.push(`剩余 ${event.posesRemaining} 个航点`)
+    }
+
     return `${parts.join('，')}。`
   }
 
@@ -645,10 +665,17 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     return dataSource.mode === 'rosbridge'
   }
 
-  function taskTarget(task: RuntimeTaskRecord) {
-    return task.targetPointId
-      ? runtime.value.map.targets.find((item) => item.id === task.targetPointId)
-      : undefined
+  function taskTargetIds(task: RuntimeTaskRecord) {
+    if (task.targetPointIds?.length) return task.targetPointIds
+    return task.targetPointId ? [task.targetPointId] : []
+  }
+
+  function taskTargets(task: RuntimeTaskRecord) {
+    return taskTargetIds(task).flatMap((targetId) => {
+      const target = runtime.value.map.targets.find((item) => item.id === targetId)
+
+      return target ? [target] : []
+    })
   }
 
   function toNavigateCommand(
@@ -668,6 +695,37 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     }
   }
 
+  function toNavigateThroughPosesCommand(
+    task: RuntimeTaskRecord,
+    targets: RuntimeMapPoint[],
+  ): NavigateThroughPosesTaskCommand {
+    return {
+      taskId: task.id,
+      taskType: task.type,
+      targetNames: targets.map((target) => target.name),
+      targetPoses: targets.map((target, index) => {
+        const nextTarget = targets[index + 1]
+        const previousTarget = targets[index - 1]
+        const directionStart = nextTarget ? target : (previousTarget ?? target)
+        const directionEnd = nextTarget ?? target
+        const yawRad =
+          directionStart === directionEnd
+            ? runtime.value.map.robotPose.yawRad
+            : Math.atan2(
+                directionEnd.y - directionStart.y,
+                directionEnd.x - directionStart.x,
+              )
+
+        return {
+          x: target.x,
+          y: target.y,
+          yawRad,
+          frameId: runtime.value.map.ros.frameId,
+        }
+      }),
+    }
+  }
+
   function markTaskCommandFailed(taskId: string, error: unknown, action: string) {
     const message = error instanceof Error ? error.message : `${action}失败`
     const timestamp = nowText()
@@ -684,16 +742,24 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     appendLog('error', `任务 ${taskId} ${action}失败：${message}`)
   }
 
-  function sendNavigateCommand(task: RuntimeTaskRecord, action = '导航任务下发') {
-    const target = taskTarget(task)
+  function sendTaskCommand(task: RuntimeTaskRecord, action = '导航任务下发') {
+    const targets = taskTargets(task)
 
-    if (!target) {
+    if (!targets.length) {
       appendLog('warn', `任务 ${task.id} 缺少目标点，无法${action}`)
       return
     }
 
-    void taskCommandClient
-      .sendNavigateToPose(toNavigateCommand(task, target))
+    const command =
+      task.type === 'multi_point_cruise'
+        ? taskCommandClient.sendNavigateThroughPoses(
+            toNavigateThroughPosesCommand(task, targets),
+          )
+        : taskCommandClient.sendNavigateToPose(
+            toNavigateCommand(task, targets[0] as RuntimeMapPoint),
+          )
+
+    void command
       .then((result) => {
         appendLog('info', `任务 ${task.id} ${action}成功${result.goalId ? `，goal=${result.goalId}` : ''}`)
       })
@@ -739,7 +805,19 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
   }
 
   function createTask(input: CreateTaskInput) {
-    if (input.type !== 'return_home' && !input.targetPointId) {
+    const requestedTargetIds =
+      input.type === 'multi_point_cruise'
+        ? [...new Set(input.targetPointIds ?? [])]
+        : input.targetPointId
+          ? [input.targetPointId]
+          : []
+
+    if (input.type === 'multi_point_cruise' && requestedTargetIds.length < 2) {
+      appendLog('warn', '多点巡航至少需要选择两个已保存目标点')
+      return null
+    }
+
+    if (input.type !== 'return_home' && !requestedTargetIds.length) {
       appendLog('warn', '请先选择并保存目标点，再下发任务')
       return null
     }
@@ -754,15 +832,30 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     const timestamp = nowText()
     const id = `TASK-${String(nextTaskNumber).padStart(4, '0')}`
     nextTaskNumber += 1
-    const target = input.targetPointId
-      ? runtime.value.map.targets.find((item) => item.id === input.targetPointId)
-      : undefined
+    const targets = requestedTargetIds.flatMap((targetId) => {
+      const target = runtime.value.map.targets.find((item) => item.id === targetId)
+
+      return target ? [target] : []
+    })
+
+    if (
+      input.type !== 'return_home' &&
+      targets.length !== requestedTargetIds.length
+    ) {
+      appendLog('warn', '部分巡航目标点不存在，请重新选择')
+      return null
+    }
+
+    const target = targets[0]
     const currentIsBusy = isTaskActive(runtime.value.task.status)
     const status: RuntimeTaskStatus = isScheduled || currentIsBusy ? 'idle' : 'running'
     const task: RuntimeTaskRecord = {
       id,
       name: taskTypeNames[input.type],
-      targetName: target?.name ?? (input.type === 'return_home' ? 'Home' : '待选择'),
+      targetName:
+        input.type === 'multi_point_cruise'
+          ? targets.map((item) => item.name).join(' → ')
+          : target?.name ?? (input.type === 'return_home' ? 'Home' : '待选择'),
       type: input.type,
       status,
       dispatchMode: isScheduled ? 'scheduled' : 'immediate',
@@ -775,7 +868,12 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
             createdAt: Date.now(),
           }
         : undefined,
-      targetPointId: input.targetPointId,
+      targetPointId:
+        input.type === 'multi_point_cruise'
+          ? requestedTargetIds.at(-1)
+          : input.targetPointId,
+      targetPointIds:
+        input.type === 'multi_point_cruise' ? requestedTargetIds : undefined,
       createdTime: timestamp,
       completedTime: null,
       progressPercent: 0,
@@ -803,10 +901,10 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     const nextTasks = [task, ...runtime.value.tasks]
     setRuntimeWithTasks(nextTasks, status === 'running' ? id : runtime.value.task.id)
 
-    if (input.targetPointId) {
-      setActiveTarget(input.targetPointId)
+    if (requestedTargetIds.length) {
+      setActiveTarget(requestedTargetIds.at(-1))
       if (status === 'running') {
-        setRouteToTarget(input.targetPointId)
+        setRouteToTargets(requestedTargetIds)
       }
     }
 
@@ -818,7 +916,7 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     )
 
     if (isRosbridgeMode() && status === 'running') {
-      sendNavigateCommand(task)
+      sendTaskCommand(task)
     }
 
     return id
@@ -869,12 +967,12 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     )
     setRuntimeWithTasks(records, taskId)
 
-    if (task.targetPointId) {
-      setRouteToTarget(task.targetPointId)
+    if (taskTargetIds(task).length) {
+      setRouteToTargets(taskTargetIds(task))
     }
 
     if (isRosbridgeMode()) {
-      sendNavigateCommand(task, '启动任务')
+      sendTaskCommand(task, '启动任务')
     }
 
     window.setTimeout(() => {
@@ -902,20 +1000,28 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       ),
       taskId,
     )
-    if (task.targetPointId) {
-      setRouteToTarget(task.targetPointId)
+    if (taskTargetIds(task).length) {
+      setRouteToTargets(taskTargetIds(task))
     }
 
     if (isRosbridgeMode()) {
-      const target = taskTarget(task)
+      const targets = taskTargets(task)
 
-      if (!target) {
+      if (!targets.length) {
         appendLog('warn', `任务 ${taskId} 缺少目标点，无法继续`)
         return
       }
 
-      void taskCommandClient
-        .resumeTask(toNavigateCommand(task, target))
+      const command =
+        task.type === 'multi_point_cruise'
+          ? taskCommandClient.sendNavigateThroughPoses(
+              toNavigateThroughPosesCommand(task, targets),
+            )
+          : taskCommandClient.resumeTask(
+              toNavigateCommand(task, targets[0] as RuntimeMapPoint),
+            )
+
+      void command
         .then((result) => {
           appendLog('info', `任务 ${taskId} 继续成功${result.goalId ? `，goal=${result.goalId}` : ''}`)
         })
@@ -982,12 +1088,12 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
         : item,
     )
     setRuntimeWithTasks(records, taskId)
-    if (task.targetPointId) {
-      setRouteToTarget(task.targetPointId)
+    if (taskTargetIds(task).length) {
+      setRouteToTargets(taskTargetIds(task))
     }
 
     if (isRosbridgeMode()) {
-      sendNavigateCommand({ ...task, status: 'running' }, '重试任务')
+      sendTaskCommand({ ...task, status: 'running' }, '重试任务')
     }
 
     window.setTimeout(() => {

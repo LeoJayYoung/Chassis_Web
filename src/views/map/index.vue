@@ -13,6 +13,7 @@ const targetSelectionMode = ref(false)
 const targetDraft = ref<MapPoint | null>(null)
 const targetDraftName = ref('')
 const selectedTaskType = ref<TaskType>(dashboard.value.task.type)
+const selectedCruiseTargetIds = ref<string[]>([])
 const selectedDispatchMode = ref<DispatchMode>('immediate')
 const scheduledAtInput = ref('')
 const actionMessage = ref('')
@@ -57,10 +58,30 @@ const modeOptions = [
 const activeTarget = computed(
   () => dashboard.value.targets.find((item) => item.id === dashboard.value.activeTargetId) ?? null,
 )
+const selectedCruiseTargets = computed(() =>
+  selectedCruiseTargetIds.value.flatMap((targetId) => {
+    const target = dashboard.value.targets.find((item) => item.id === targetId)
+
+    return target ? [target] : []
+  }),
+)
+const selectedTargetSummary = computed(() => {
+  if (selectedTaskType.value === 'multi_point_cruise') {
+    return selectedCruiseTargets.value.length
+      ? selectedCruiseTargets.value.map((target) => target.name).join(' → ')
+      : '请选择至少 2 个目标点'
+  }
+
+  return activeTarget.value?.name ?? targetDraft.value?.name ?? '待选择'
+})
 
 const canDispatch = computed(
   () => {
-    const hasTarget = selectedTaskType.value === 'return_home' || Boolean(activeTarget.value)
+    const hasTarget =
+      selectedTaskType.value === 'return_home' ||
+      (selectedTaskType.value === 'multi_point_cruise'
+        ? selectedCruiseTargetIds.value.length >= 2
+        : Boolean(activeTarget.value))
 
     if (!hasTarget) return false
 
@@ -120,6 +141,25 @@ function localizationStatusClass(status: keyof typeof localizationLabels) {
 function selectTarget(targetId: string) {
   targetDraft.value = null
   targetSelectionMode.value = false
+
+  if (selectedTaskType.value === 'multi_point_cruise') {
+    const targetIndex = selectedCruiseTargetIds.value.indexOf(targetId)
+
+    if (targetIndex >= 0) {
+      selectedCruiseTargetIds.value = selectedCruiseTargetIds.value.filter(
+        (item) => item !== targetId,
+      )
+    } else {
+      selectedCruiseTargetIds.value = [...selectedCruiseTargetIds.value, targetId]
+    }
+
+    runtimeStore.setActiveTarget(selectedCruiseTargetIds.value.at(-1))
+    actionMessage.value = selectedCruiseTargetIds.value.length
+      ? `已选择 ${selectedCruiseTargetIds.value.length} 个巡航目标点。`
+      : '请选择至少 2 个巡航目标点。'
+    return
+  }
+
   runtimeStore.setActiveTarget(targetId)
   actionMessage.value = '目标点已选中，可以下发任务。'
 }
@@ -159,23 +199,45 @@ function saveTarget() {
   targetDraft.value = null
   targetDraftName.value = ''
   targetSelectionMode.value = false
+  if (selectedTaskType.value === 'multi_point_cruise') {
+    selectedCruiseTargetIds.value = [...selectedCruiseTargetIds.value, target.id]
+  }
   actionMessage.value = `目标点 ${target.name} 已保存。`
 }
 
 function clearTarget() {
   targetDraft.value = null
   targetSelectionMode.value = false
+  selectedCruiseTargetIds.value = []
   runtimeStore.clearActiveTarget()
   actionMessage.value = '当前目标选择已清除。'
 }
 
 function removeTarget(targetId: string) {
   const removed = runtimeStore.deleteTarget(targetId)
+  if (removed) {
+    selectedCruiseTargetIds.value = selectedCruiseTargetIds.value.filter(
+      (item) => item !== targetId,
+    )
+  }
   actionMessage.value = removed ? '目标点已移除。' : '目标点正在被任务使用，无法移除。'
 }
 
 function selectTaskType(type: TaskType) {
   selectedTaskType.value = type
+  if (type !== 'multi_point_cruise') {
+    selectedCruiseTargetIds.value = []
+  }
+  actionMessage.value =
+    type === 'multi_point_cruise'
+      ? '请按巡航顺序选择至少 2 个已保存目标点。'
+      : ''
+}
+
+function cruiseTargetOrder(targetId: string) {
+  const index = selectedCruiseTargetIds.value.indexOf(targetId)
+
+  return index >= 0 ? index + 1 : null
 }
 
 function selectDispatchMode(mode: DispatchMode) {
@@ -195,7 +257,13 @@ function dispatchTask() {
   const taskId = runtimeStore.createTask({
     type: selectedTaskType.value,
     targetPointId:
-      selectedTaskType.value === 'return_home' ? undefined : dashboard.value.activeTargetId,
+      selectedTaskType.value === 'single_point_navigation'
+        ? dashboard.value.activeTargetId
+        : undefined,
+    targetPointIds:
+      selectedTaskType.value === 'multi_point_cruise'
+        ? selectedCruiseTargetIds.value
+        : undefined,
     dispatchMode: selectedDispatchMode.value,
     scheduledAt,
   })
@@ -212,6 +280,10 @@ function dispatchTask() {
     selectedDispatchMode.value === 'scheduled' && scheduledAt
       ? `定时任务 ${taskId} 已创建，计划 ${formatScheduleTime(scheduledAt)} 执行。`
       : `任务 ${taskId} 已创建并同步到任务页。`
+
+  if (selectedTaskType.value === 'multi_point_cruise') {
+    selectedCruiseTargetIds.value = []
+  }
 }
 
 function pauseCurrentTask() {
@@ -288,7 +360,8 @@ function cancelCurrentTask() {
         <MapContainer
           :robot-pose="dashboard.robotPose"
           :scene="dashboard.scene"
-          :show-robot="dashboard.localization === 'ready'"
+          :show-robot="dashboard.robotVisible"
+          :selected-target-ids="selectedCruiseTargetIds"
           :selection-mode="targetSelectionMode"
           :draft-target="targetDraft ?? undefined"
           @target-select="selectTarget"
@@ -308,7 +381,7 @@ function cancelCurrentTask() {
           <div class="panel-summary">
             <div class="panel-summary__item">
               <span class="panel-summary__label">目标点</span>
-              <strong>{{ activeTarget?.name ?? targetDraft?.name ?? '待选择' }}</strong>
+              <strong>{{ selectedTargetSummary }}</strong>
             </div>
             <div class="panel-summary__item">
               <span class="panel-summary__label">已保存</span>
@@ -321,14 +394,26 @@ function cancelCurrentTask() {
               v-for="target in dashboard.targets"
               :key="target.id"
               class="target-row"
-              :class="{ 'is-active': target.id === dashboard.activeTargetId }"
+              :class="{
+                'is-active':
+                  target.id === dashboard.activeTargetId ||
+                  selectedCruiseTargetIds.includes(target.id),
+              }"
               role="button"
               tabindex="0"
               @click="selectTarget(target.id)"
               @keydown.enter="selectTarget(target.id)"
             >
               <div>
-                <strong>{{ target.name }}</strong>
+                <strong>
+                  <span
+                    v-if="cruiseTargetOrder(target.id)"
+                    class="target-order-badge"
+                  >
+                    {{ cruiseTargetOrder(target.id) }}
+                  </span>
+                  {{ target.name }}
+                </strong>
                 <span>{{ target.saved ? '已保存' : '地图目标' }}</span>
               </div>
               <button
@@ -778,9 +863,12 @@ function cancelCurrentTask() {
 }
 
 .panel-summary__item strong {
+  overflow: hidden;
   color: var(--color-primary-dark);
   font-size: 14px;
   font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .target-list {
@@ -830,6 +918,21 @@ function cancelCurrentTask() {
 .target-row span {
   color: var(--color-muted);
   font-size: 11px;
+}
+
+.target-row .target-order-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--color-primary-dark);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  vertical-align: middle;
 }
 
 .target-name-input {

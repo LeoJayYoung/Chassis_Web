@@ -43,11 +43,15 @@ export const runtimeApiConfig = {
       import.meta.env.VITE_ROS_NAVIGATE_ACTION_NAME,
       '/navigate_to_pose',
     ),
+    navigateThroughPosesActionName: envValue(
+      import.meta.env.VITE_ROS_NAVIGATE_THROUGH_POSES_ACTION_NAME,
+      '/navigate_through_poses',
+    ),
     timeoutMs: envNumber(import.meta.env.VITE_ROS_COMMAND_TIMEOUT_MS, 6000),
   },
   localizationLostTimeoutMs: envNumber(
     import.meta.env.VITE_ROS_LOCALIZATION_LOST_TIMEOUT_MS,
-    5000,
+    30000,
   ),
   snapshotPath: '/runtime/snapshot',
 }
