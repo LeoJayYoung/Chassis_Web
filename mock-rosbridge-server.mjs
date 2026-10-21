@@ -190,21 +190,28 @@ function sendNativeActionResult(goal) {
   if (goal.protocol !== 'native' || goal.resultSent) return
 
   goal.resultSent = true
-  const succeeded = goal.resultStatus === 4
   sendJson(goal.socket, {
     op: 'action_result',
     id: goal.key,
     action: goal.actionName,
     status: goal.resultStatus,
-    result: succeeded,
-    values: succeeded
+    // rosbridge result=true means the Action protocol completed successfully.
+    // Navigation outcome is represented by status (4/5/6).
+    result: true,
+    values: goal.resultStatus === 4
       ? {
           error_code: 0,
           error_msg: '',
         }
       : goal.resultStatus === 5
-        ? 'Mock 导航任务已取消'
-        : 'Mock 导航任务失败',
+        ? {
+            error_code: 1,
+            error_msg: 'Mock 导航任务已取消',
+          }
+        : {
+            error_code: 2,
+            error_msg: 'Mock 导航任务失败',
+          },
   })
 }
 

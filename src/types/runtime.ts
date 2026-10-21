@@ -208,6 +208,8 @@ export interface RuntimeTaskState {
   feedback: string
   targetPointId?: string
   targetPointIds?: string[]
+  nextTargetIndex?: number
+  activeGoalStartIndex?: number
   progressPercent: number
   etaMinutes: number
 }
@@ -238,6 +240,8 @@ export interface RuntimeTaskRecord {
   schedule?: RuntimeTaskSchedule
   targetPointId?: string
   targetPointIds?: string[]
+  nextTargetIndex?: number
+  activeGoalStartIndex?: number
   createdTime: string
   completedTime: string | null
   progressPercent: number

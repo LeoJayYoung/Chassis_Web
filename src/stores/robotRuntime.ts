@@ -88,6 +88,8 @@ function taskStateFromRecord(record: RuntimeTaskRecord): RuntimeTaskState {
     feedback: record.feedback ?? '暂无任务反馈',
     targetPointId: record.targetPointId,
     targetPointIds: record.targetPointIds,
+    nextTargetIndex: record.nextTargetIndex,
+    activeGoalStartIndex: record.activeGoalStartIndex,
     progressPercent: record.progressPercent,
     etaMinutes: record.etaMinutes,
   }
@@ -596,17 +598,35 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
   ) {
     const progressPercent = progressFromRemainingDistance(event.distanceRemaining)
 
-    updateTaskRecord(event.taskId, (task) => ({
-      ...task,
-      status: 'running',
-      transitioning: false,
-      feedback: feedbackFromCommandEvent(event),
-      progressPercent: progressPercent ?? task.progressPercent,
-      etaMinutes:
-        event.estimatedTimeRemainingSec === undefined
-          ? task.etaMinutes
-          : Math.max(0, Math.ceil(event.estimatedTimeRemainingSec / 60)),
-    }))
+    updateTaskRecord(event.taskId, (task) => {
+      const allTargetIds = task.targetPointIds ?? []
+      const goalStartIndex = task.activeGoalStartIndex ?? 0
+      const sentTargetCount = Math.max(allTargetIds.length - goalStartIndex, 0)
+      const completedInCurrentGoal =
+        event.posesRemaining === undefined
+          ? 0
+          : Math.min(
+              Math.max(sentTargetCount - Math.round(event.posesRemaining), 0),
+              sentTargetCount,
+            )
+      const nextTargetIndex =
+        event.posesRemaining === undefined
+          ? task.nextTargetIndex
+          : Math.min(goalStartIndex + completedInCurrentGoal, allTargetIds.length)
+
+      return {
+        ...task,
+        status: 'running',
+        transitioning: false,
+        feedback: feedbackFromCommandEvent(event),
+        nextTargetIndex,
+        progressPercent: progressPercent ?? task.progressPercent,
+        etaMinutes:
+          event.estimatedTimeRemainingSec === undefined
+            ? task.etaMinutes
+            : Math.max(0, Math.ceil(event.estimatedTimeRemainingSec / 60)),
+      }
+    })
   }
 
   function updateTaskFromCommandStatus(
@@ -635,6 +655,10 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       transitioning: false,
       completedTime: isTerminal ? timestamp : task.completedTime,
       progressPercent: status === 'completed' ? 100 : task.progressPercent,
+      nextTargetIndex:
+        status === 'completed' && task.targetPointIds
+          ? task.targetPointIds.length
+          : task.nextTargetIndex,
       etaMinutes: isTerminal ? 0 : task.etaMinutes,
       feedback,
       failureReason: status === 'failed' ? event.errorMessage ?? event.feedback : task.failureReason,
@@ -672,6 +696,20 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
 
   function taskTargets(task: RuntimeTaskRecord) {
     return taskTargetIds(task).flatMap((targetId) => {
+      const target = runtime.value.map.targets.find((item) => item.id === targetId)
+
+      return target ? [target] : []
+    })
+  }
+
+  function remainingTaskTargets(task: RuntimeTaskRecord) {
+    const targetIds = taskTargetIds(task)
+    const startIndex =
+      task.type === 'multi_point_cruise'
+        ? Math.min(Math.max(task.nextTargetIndex ?? 0, 0), targetIds.length)
+        : 0
+
+    return targetIds.slice(startIndex).flatMap((targetId) => {
       const target = runtime.value.map.targets.find((item) => item.id === targetId)
 
       return target ? [target] : []
@@ -750,6 +788,13 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       return
     }
 
+    if (task.type === 'multi_point_cruise') {
+      updateTaskRecord(task.id, (item) => ({
+        ...item,
+        activeGoalStartIndex: 0,
+      }))
+    }
+
     const command =
       task.type === 'multi_point_cruise'
         ? taskCommandClient.sendNavigateThroughPoses(
@@ -779,9 +824,14 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     void taskCommandClient
       .pauseTask({ taskId })
       .then(() => {
-        transitionTask(taskId, 'paused', '任务已暂停，当前导航 goal 已取消。')
+        appendLog('info', `任务 ${taskId} 的暂停已由 Nav2 确认`)
       })
       .catch((error: unknown) => {
+        const latestTask = runtime.value.tasks.find((task) => task.id === taskId)
+        if (latestTask && terminalTaskStatuses.includes(latestTask.status)) {
+          appendLog('warn', `任务 ${taskId} 在暂停确认前已进入 ${latestTask.status}`)
+          return
+        }
         markTaskCommandFailed(taskId, error, '暂停任务')
       })
   }
@@ -797,9 +847,14 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     void taskCommandClient
       .cancelTask({ taskId })
       .then(() => {
-        transitionTask(taskId, 'canceled', '任务已取消，当前导航 goal 已停止。')
+        appendLog('info', `任务 ${taskId} 的取消已由 Nav2 确认`)
       })
       .catch((error: unknown) => {
+        const latestTask = runtime.value.tasks.find((task) => task.id === taskId)
+        if (latestTask && terminalTaskStatuses.includes(latestTask.status)) {
+          appendLog('warn', `任务 ${taskId} 在取消确认前已进入 ${latestTask.status}`)
+          return
+        }
         markTaskCommandFailed(taskId, error, '取消任务')
       })
   }
@@ -874,6 +929,8 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
           : input.targetPointId,
       targetPointIds:
         input.type === 'multi_point_cruise' ? requestedTargetIds : undefined,
+      nextTargetIndex: input.type === 'multi_point_cruise' ? 0 : undefined,
+      activeGoalStartIndex: input.type === 'multi_point_cruise' ? 0 : undefined,
       createdTime: timestamp,
       completedTime: null,
       progressPercent: 0,
@@ -1000,23 +1057,42 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       ),
       taskId,
     )
-    if (taskTargetIds(task).length) {
-      setRouteToTargets(taskTargetIds(task))
+    const remainingTargetIds =
+      task.type === 'multi_point_cruise'
+        ? taskTargetIds(task).slice(task.nextTargetIndex ?? 0)
+        : taskTargetIds(task)
+
+    if (remainingTargetIds.length) {
+      setRouteToTargets(remainingTargetIds)
     }
 
     if (isRosbridgeMode()) {
-      const targets = taskTargets(task)
+      const targets =
+        task.type === 'multi_point_cruise'
+          ? remainingTaskTargets(task)
+          : taskTargets(task)
 
       if (!targets.length) {
-        appendLog('warn', `任务 ${taskId} 缺少目标点，无法继续`)
+        appendLog('warn', `任务 ${taskId} 已无剩余目标点，无法继续`)
         return
+      }
+
+      if (task.type === 'multi_point_cruise') {
+        updateTaskRecord(taskId, (item) => ({
+          ...item,
+          activeGoalStartIndex: item.nextTargetIndex ?? 0,
+        }))
       }
 
       const command =
         task.type === 'multi_point_cruise'
-          ? taskCommandClient.sendNavigateThroughPoses(
-              toNavigateThroughPosesCommand(task, targets),
-            )
+          ? targets.length === 1
+            ? taskCommandClient.sendNavigateToPose(
+                toNavigateCommand(task, targets[0] as RuntimeMapPoint),
+              )
+            : taskCommandClient.sendNavigateThroughPoses(
+                toNavigateThroughPosesCommand(task, targets),
+              )
           : taskCommandClient.resumeTask(
               toNavigateCommand(task, targets[0] as RuntimeMapPoint),
             )
@@ -1081,6 +1157,9 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
             transitioning: true,
             completedTime: null,
             progressPercent: 0,
+            nextTargetIndex: item.type === 'multi_point_cruise' ? 0 : undefined,
+            activeGoalStartIndex:
+              item.type === 'multi_point_cruise' ? 0 : undefined,
             failureReason: undefined,
             feedback: '任务已重试，正在重新规划路径。',
             timeline: [...item.timeline, { status: 'retried' as const, timestamp }],
@@ -1093,7 +1172,16 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     }
 
     if (isRosbridgeMode()) {
-      sendTaskCommand({ ...task, status: 'running' }, '重试任务')
+      sendTaskCommand(
+        {
+          ...task,
+          status: 'running',
+          nextTargetIndex: task.type === 'multi_point_cruise' ? 0 : undefined,
+          activeGoalStartIndex:
+            task.type === 'multi_point_cruise' ? 0 : undefined,
+        },
+        '重试任务',
+      )
     }
 
     window.setTimeout(() => {

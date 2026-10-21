@@ -68,6 +68,13 @@ export interface TaskCommandClient {
   disconnect(): void
 }
 
+interface PendingActionCancel {
+  goalId: string
+  resolve: (result: TaskCommandResult) => void
+  reject: (error: Error) => void
+  timer: number
+}
+
 function trimTrailingSlashes(value: string) {
   return value.replace(/\/+$/, '')
 }
@@ -198,6 +205,7 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
   private goals = new Map<string, { goalId: string; action: string }>()
   private taskIdsByGoalId = new Map<string, string>()
   private listeners = new Set<TaskCommandEventListener>()
+  private pendingCancels = new Map<string, PendingActionCancel>()
 
   async sendNavigateToPose(command: NavigateTaskCommand) {
     const socket = await this.ensureSocket()
@@ -334,13 +342,20 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
         action: goal.action,
       }),
     )
-    this.goals.delete(command.taskId)
 
-    return {
-      accepted: true,
-      goalId: goal.goalId,
-      message: 'Nav2 goal 取消请求已发送',
-    }
+    return new Promise<TaskCommandResult>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        this.pendingCancels.delete(command.taskId)
+        reject(new Error('等待 Nav2 取消结果超时'))
+      }, Math.max(runtimeApiConfig.rosCommands.timeoutMs, 10_000))
+
+      this.pendingCancels.set(command.taskId, {
+        goalId: goal.goalId,
+        resolve,
+        reject,
+        timer,
+      })
+    })
   }
 
   subscribeTaskEvents(listener: TaskCommandEventListener) {
@@ -356,6 +371,12 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
   }
 
   disconnect() {
+    for (const [taskId, pending] of this.pendingCancels) {
+      window.clearTimeout(pending.timer)
+      pending.reject(new Error(`命令连接已断开：${taskId}`))
+    }
+    this.pendingCancels.clear()
+
     if (!this.socket) return
 
     const socket = this.socket
@@ -467,6 +488,28 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
       : typeof payload.values === 'string'
         ? payload.values
         : undefined
+
+    const pendingCancel = this.pendingCancels.get(taskId)
+    if (pendingCancel?.goalId === goalId) {
+      window.clearTimeout(pendingCancel.timer)
+      this.pendingCancels.delete(taskId)
+
+      if (status === 'canceled') {
+        pendingCancel.resolve({
+          accepted: true,
+          goalId,
+          message: 'Nav2 goal 已确认取消',
+        })
+      } else {
+        pendingCancel.reject(
+          new Error(
+            status === 'completed'
+              ? '任务在取消确认前已完成'
+              : errorMessage || `取消任务返回状态：${status}`,
+          ),
+        )
+      }
+    }
 
     this.goals.delete(taskId)
     this.taskIdsByGoalId.delete(goalId)
