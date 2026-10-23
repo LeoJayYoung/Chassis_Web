@@ -2,6 +2,15 @@
 import Konva from 'konva'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { OverviewMapSnapshot, RuntimeOccupancyGrid } from '../../types'
+import {
+  occupancyGridToCanvasOverlay,
+  type RosMapTransform,
+} from '../../utils/mapCoordinates'
+import {
+  filterOccupancyNoise,
+  occupancyVisualFilterConfig,
+  occupancyVisualFilterKey,
+} from '../../utils/occupancyGridFilter'
 import { themeColors } from '../../utils/theme'
 
 const BASE_WIDTH = 1000
@@ -20,6 +29,10 @@ let layer: Konva.Layer | null = null
 let contentGroup: Konva.Group | null = null
 let resizeObserver: ResizeObserver | null = null
 let occupancyRasterCache: {
+  key: string
+  canvas: HTMLCanvasElement
+} | null = null
+let keepoutRasterCache: {
   key: string
   canvas: HTMLCanvasElement
 } | null = null
@@ -84,6 +97,7 @@ function occupancyRasterKey(grid: RuntimeOccupancyGrid) {
     grid.originX,
     grid.originY,
     grid.originYawRad,
+    occupancyVisualFilterKey(),
   ].join(':')
 }
 
@@ -116,12 +130,18 @@ function createOccupancyRaster(grid: RuntimeOccupancyGrid) {
   }
 
   const imageData = context.createImageData(grid.widthCells, grid.heightCells)
+  const displayData = filterOccupancyNoise(
+    grid.data,
+    grid.widthCells,
+    grid.heightCells,
+    occupancyVisualFilterConfig,
+  )
 
   for (let mapRow = 0; mapRow < grid.heightCells; mapRow += 1) {
     const canvasRow = grid.heightCells - 1 - mapRow
 
     for (let column = 0; column < grid.widthCells; column += 1) {
-      const value = grid.data[mapRow * grid.widthCells + column] ?? -1
+      const value = displayData[mapRow * grid.widthCells + column] ?? -1
       const [red, green, blue] = occupancyColor(value)
       const pixelIndex = (canvasRow * grid.widthCells + column) * 4
 
@@ -153,6 +173,100 @@ function addOccupancyGrid(group: Konva.Group) {
   )
 
   return true
+}
+
+function keepoutRasterKey(grid: RuntimeOccupancyGrid) {
+  return [
+    grid.stamp,
+    grid.widthCells,
+    grid.heightCells,
+    grid.resolution,
+    grid.originX,
+    grid.originY,
+    grid.originYawRad,
+  ].join(':')
+}
+
+function createKeepoutRaster(grid: RuntimeOccupancyGrid) {
+  const key = keepoutRasterKey(grid)
+
+  if (keepoutRasterCache?.key === key) {
+    return keepoutRasterCache.canvas
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = grid.widthCells
+  canvas.height = grid.heightCells
+
+  const context = canvas.getContext('2d')
+
+  if (!context) return canvas
+
+  const imageData = context.createImageData(grid.widthCells, grid.heightCells)
+
+  for (let mapRow = 0; mapRow < grid.heightCells; mapRow += 1) {
+    const canvasRow = grid.heightCells - 1 - mapRow
+
+    for (let column = 0; column < grid.widthCells; column += 1) {
+      const value = grid.data[mapRow * grid.widthCells + column] ?? -1
+      const pixelIndex = (canvasRow * grid.widthCells + column) * 4
+
+      if (value <= 0) {
+        imageData.data.set([0, 0, 0, 0], pixelIndex)
+        continue
+      }
+
+      const strength = Math.min(Math.max(value, 0), 100) / 100
+      imageData.data.set(
+        [244, 114, 182, Math.round(82 + strength * 76)],
+        pixelIndex,
+      )
+    }
+  }
+
+  context.putImageData(imageData, 0, 0)
+  keepoutRasterCache = { key, canvas }
+
+  return canvas
+}
+
+function addKeepoutMask(group: Konva.Group) {
+  const baseGrid = props.snapshot.occupancyGrid
+  const keepoutMask = props.snapshot.keepoutMask
+
+  if (!baseGrid || !keepoutMask) return
+  if (
+    baseGrid.frameId &&
+    keepoutMask.frameId &&
+    baseGrid.frameId !== keepoutMask.frameId
+  ) {
+    return
+  }
+
+  const transform: RosMapTransform = {
+    canvasWidth: sceneWidth(),
+    canvasHeight: sceneHeight(),
+    widthCells: baseGrid.widthCells,
+    heightCells: baseGrid.heightCells,
+    resolution: baseGrid.resolution,
+    originX: baseGrid.originX,
+    originY: baseGrid.originY,
+    originYawRad: baseGrid.originYawRad,
+  }
+  const placement = occupancyGridToCanvasOverlay(keepoutMask, transform)
+
+  group.add(
+    new Konva.Image({
+      image: createKeepoutRaster(keepoutMask),
+      x: placement.x,
+      y: placement.y,
+      width: placement.width,
+      height: placement.height,
+      rotation: placement.rotationDeg,
+      imageSmoothingEnabled: false,
+      listening: false,
+    }),
+  )
 }
 
 function addGrid(group: Konva.Group) {
@@ -419,6 +533,7 @@ function drawScene() {
     addObstacles(group)
   }
 
+  addKeepoutMask(group)
   addPath(group)
   addWaypoints(group)
 
@@ -492,6 +607,7 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
   occupancyRasterCache = null
+  keepoutRasterCache = null
   stage?.destroy()
   stage = null
   layer = null

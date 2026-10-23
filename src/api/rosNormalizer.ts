@@ -33,6 +33,7 @@ interface ParsedPose {
 
 export type SupportedRosTopic =
   | '/map'
+  | '/keepout_filter_mask'
   | '/amcl_pose'
   | '/plan'
   | '/odom'
@@ -44,6 +45,7 @@ export type SupportedRosTopic =
 
 export type NormalizedRosMessage =
   | { topic: '/map'; value: RuntimeOccupancyGrid }
+  | { topic: '/keepout_filter_mask'; value: RuntimeOccupancyGrid }
   | { topic: '/amcl_pose'; value: RuntimeRobotPose }
   | { topic: '/plan'; value: RuntimePathSnapshot }
   | { topic: '/odom'; value: RuntimeOdometrySnapshot }
@@ -506,6 +508,7 @@ export function normalizeDiagnosticArrayMessage(
 function canonicalTopic(topic: string): SupportedRosTopic | null {
   const value = topic.trim().replace(/\/+$/, '')
 
+  if (value.endsWith('/keepout_filter_mask')) return '/keepout_filter_mask'
   if (value.endsWith('/map')) return '/map'
   if (value.endsWith('/amcl_pose')) return '/amcl_pose'
   if (value.endsWith('/plan')) return '/plan'
@@ -528,6 +531,10 @@ export function normalizeRosMessage(
 
   switch (normalizedTopic) {
     case '/map': {
+      const value = normalizeOccupancyGridMessage(message, receivedAt)
+      return value ? { topic: normalizedTopic, value } : null
+    }
+    case '/keepout_filter_mask': {
       const value = normalizeOccupancyGridMessage(message, receivedAt)
       return value ? { topic: normalizedTopic, value } : null
     }

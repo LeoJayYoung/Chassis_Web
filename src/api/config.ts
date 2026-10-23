@@ -29,6 +29,10 @@ export const runtimeApiConfig = {
   rosbridgeWsUrl: import.meta.env.VITE_ROSBRIDGE_WS_URL?.trim() || '',
   rosTopics: {
     map: envValue(import.meta.env.VITE_ROS_TOPIC_MAP, '/map'),
+    keepoutFilterMask: envValue(
+      import.meta.env.VITE_ROS_TOPIC_KEEPOUT_FILTER_MASK,
+      '/keepout_filter_mask',
+    ),
     amclPose: envValue(import.meta.env.VITE_ROS_TOPIC_AMCL_POSE, '/amcl_pose'),
     plan: envValue(import.meta.env.VITE_ROS_TOPIC_PLAN, '/plan'),
     odom: envValue(import.meta.env.VITE_ROS_TOPIC_ODOM, '/odom'),

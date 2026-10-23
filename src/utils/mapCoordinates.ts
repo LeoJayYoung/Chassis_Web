@@ -32,6 +32,21 @@ export interface CanvasPose2D extends Point2D {
   stamp: number
 }
 
+export interface OccupancyGridGeometry {
+  resolution: number
+  widthCells: number
+  heightCells: number
+  originX: number
+  originY: number
+  originYawRad: number
+}
+
+export interface CanvasGridOverlayTransform extends Point2D {
+  width: number
+  height: number
+  rotationDeg: number
+}
+
 function radToDeg(rad: number) {
   return (rad * 180) / Math.PI
 }
@@ -144,4 +159,40 @@ export function canvasRectToRosRect(rect: Rect2D, transform: RosMapTransform): R
     canvasPointToRosPoint({ x: rect.x, y: rect.y + rect.height }, transform),
     canvasPointToRosPoint({ x: rect.x + rect.width, y: rect.y + rect.height }, transform),
   ])
+}
+
+export function occupancyGridToCanvasOverlay(
+  grid: OccupancyGridGeometry,
+  transform: RosMapTransform,
+): CanvasGridOverlayTransform {
+  const widthMeters = grid.widthCells * grid.resolution
+  const heightMeters = grid.heightCells * grid.resolution
+  const cos = Math.cos(grid.originYawRad)
+  const sin = Math.sin(grid.originYawRad)
+  const localToRos = (localX: number, localY: number) => ({
+    x: grid.originX + localX * cos - localY * sin,
+    y: grid.originY + localX * sin + localY * cos,
+  })
+  const topLeft = rosPointToCanvasPoint(
+    localToRos(0, heightMeters),
+    transform,
+  )
+  const topRight = rosPointToCanvasPoint(
+    localToRos(widthMeters, heightMeters),
+    transform,
+  )
+  const bottomLeft = rosPointToCanvasPoint(localToRos(0, 0), transform)
+
+  return {
+    x: topLeft.x,
+    y: topLeft.y,
+    width: Math.hypot(topRight.x - topLeft.x, topRight.y - topLeft.y),
+    height: Math.hypot(
+      bottomLeft.x - topLeft.x,
+      bottomLeft.y - topLeft.y,
+    ),
+    rotationDeg: radToDeg(
+      Math.atan2(topRight.y - topLeft.y, topRight.x - topLeft.x),
+    ),
+  }
 }

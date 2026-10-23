@@ -190,6 +190,7 @@ export interface RuntimeMapSnapshot {
   height: number
   ros: RuntimeRosMapMetadata
   occupancyGrid?: RuntimeOccupancyGrid
+  keepoutMask?: RuntimeOccupancyGrid
   activeTargetId?: string
   draftTarget?: RuntimeMapPoint
   robotPose: RuntimeRobotPose

@@ -137,6 +137,7 @@ function mergeRosbridgeSnapshot(
       height: incoming.map.height,
       ros: incoming.map.ros,
       occupancyGrid: incoming.map.occupancyGrid ?? current.map.occupancyGrid,
+      keepoutMask: incoming.map.keepoutMask ?? current.map.keepoutMask,
       robotPose: incoming.map.robotPose,
       robotPoseReceived:
         incoming.map.robotPoseReceived ?? current.map.robotPoseReceived,
@@ -156,7 +157,7 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
   let dataSourceInitialized = false
   let mockPoseTimer: number | undefined
   let mockPoseTick = 0
-  let nextTaskNumber = 47
+  let nextTaskNumber = 1
   let nextTargetNumber = 6
   let scheduleTimer: number | undefined
   const pauseRequestedTaskIds = new Set<string>()

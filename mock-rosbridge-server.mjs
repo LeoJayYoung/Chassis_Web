@@ -262,6 +262,43 @@ function createDemoMap() {
   }
 }
 
+function createKeepoutMask() {
+  const width = 85
+  const height = 105
+  const data = new Array(width * height).fill(0)
+
+  const fillRect = (startX, startY, rectWidth, rectHeight, value = 100) => {
+    for (let y = startY; y < startY + rectHeight; y += 1) {
+      for (let x = startX; x < startX + rectWidth; x += 1) {
+        if (x >= 0 && x < width && y >= 0 && y < height) {
+          data[y * width + x] = value
+        }
+      }
+    }
+  }
+
+  fillRect(8, 8, 18, 12)
+  fillRect(56, 58, 18, 22)
+
+  return {
+    header: {
+      stamp: nowStamp(),
+      frame_id: 'map',
+    },
+    info: {
+      map_load_time: nowStamp(),
+      resolution: 0.05,
+      width,
+      height,
+      origin: {
+        position: { x: -2.33, y: -3.3, z: 0 },
+        orientation: { x: 0, y: 0, z: 0, w: 1 },
+      },
+    },
+    data,
+  }
+}
+
 function createPose(tick) {
   const activeGoal = [...actionGoals.values()].find(
     (goal) => goal.status === 1 || goal.status === 2,
@@ -850,6 +887,7 @@ setInterval(() => {
 
 setInterval(() => {
   publish('/map', createDemoMap())
+  publish('/keepout_filter_mask', createKeepoutMask())
 }, 2000)
 
 server.listen(PORT, () => {

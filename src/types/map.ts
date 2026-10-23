@@ -45,6 +45,7 @@ export interface MapSceneSnapshot {
   width: number
   height: number
   occupancyGrid?: RuntimeOccupancyGrid
+  keepoutMask?: RuntimeOccupancyGrid
   zones: MapZone[]
   obstacles: MapObstacle[]
   routePoints: number[]

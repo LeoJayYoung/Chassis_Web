@@ -120,6 +120,7 @@ function toMapSceneSnapshot(runtime: RuntimeDashboardSnapshot): MapSceneSnapshot
     width: runtime.map.width,
     height: runtime.map.height,
     occupancyGrid: runtime.map.occupancyGrid,
+    keepoutMask: runtime.map.keepoutMask,
     zones: runtime.map.zones.map((zone) => toMapZone(zone, transform)),
     obstacles: runtime.map.obstacles.map((obstacle) => toMapObstacle(obstacle, transform)),
     routePoints: toRoutePoints(runtime.map.routePoints, transform),
@@ -135,6 +136,7 @@ function toOverviewMapSnapshot(runtime: RuntimeDashboardSnapshot): OverviewMapSn
   return {
     name: runtime.map.name,
     occupancyGrid: runtime.map.occupancyGrid,
+    keepoutMask: runtime.map.keepoutMask,
     robotVisible: runtime.map.robotPoseReceived !== false,
     robotXPercent: toPercent(robotPose.x, runtime.map.width),
     robotYPercent: toPercent(robotPose.y, runtime.map.height),

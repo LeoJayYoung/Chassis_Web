@@ -143,6 +143,7 @@ onBeforeUnmount(() => {
           <span><i class="legend-dot is-robot"></i>机器人</span>
           <span><i class="legend-dot is-target"></i>目标点</span>
           <span><i class="legend-line"></i>规划路径</span>
+          <span><i class="legend-area is-keepout"></i>电子栅栏</span>
           <span><i class="legend-dot is-gray"></i>障碍物</span>
         </div>
       </article>
@@ -571,6 +572,17 @@ onBeforeUnmount(() => {
   height: 2px;
   border-radius: 999px;
   background: var(--color-primary);
+}
+
+.legend-area {
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.legend-area.is-keepout {
+  border: 1px solid rgba(219, 39, 119, 0.45);
+  background: rgba(244, 114, 182, 0.48);
 }
 
 .side-column {

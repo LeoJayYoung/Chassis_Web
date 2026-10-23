@@ -68,6 +68,7 @@ export interface OverviewMapZone {
 export interface OverviewMapSnapshot {
   name: string
   occupancyGrid?: RuntimeOccupancyGrid
+  keepoutMask?: RuntimeOccupancyGrid
   robotVisible: boolean
   robotXPercent: number
   robotYPercent: number

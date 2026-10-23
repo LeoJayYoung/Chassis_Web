@@ -46,6 +46,7 @@ function buildSubscriptions(): RosbridgeSubscription[] {
 
   return [
     { topic: topics.map, throttleRate: 1000 },
+    { topic: topics.keepoutFilterMask, throttleRate: 1000 },
     { topic: topics.amclPose, throttleRate: 200 },
     { topic: topics.plan, throttleRate: 500 },
     { topic: topics.odom, throttleRate: 200 },
@@ -84,6 +85,7 @@ function createRosbridgeSnapshot(): RuntimeDashboardSnapshot {
       draftTarget: undefined,
       targets: [],
       routePoints: [],
+      keepoutMask: undefined,
       obstacles: [],
       zones: [],
     },
@@ -399,6 +401,16 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
               originYawRad: normalized.value.originYawRad,
             },
             occupancyGrid: normalized.value,
+          },
+        }
+        break
+
+      case '/keepout_filter_mask':
+        this.snapshot = {
+          ...this.snapshot,
+          map: {
+            ...this.snapshot.map,
+            keepoutMask: normalized.value,
           },
         }
         break
