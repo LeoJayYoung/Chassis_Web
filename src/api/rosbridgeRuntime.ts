@@ -25,11 +25,15 @@ interface RosbridgeEnvelope {
 
 interface RosbridgeSubscription {
   topic: string
+  messageType: string
   throttleRate: number
+  required: boolean
 }
 
 const RECONNECT_DELAY_MS = 1600
 const LOCALIZATION_CHECK_MS = 1000
+const SUBSCRIPTION_RETRY_MS = 2000
+const MAX_SUBSCRIPTION_RETRIES = 30
 
 const DEFAULT_TELEMETRY: RuntimeTelemetrySnapshot = {
   communication: {
@@ -45,16 +49,66 @@ function buildSubscriptions(): RosbridgeSubscription[] {
   const topics = runtimeApiConfig.rosTopics
 
   return [
-    { topic: topics.map, throttleRate: 1000 },
-    { topic: topics.keepoutFilterMask, throttleRate: 1000 },
-    { topic: topics.amclPose, throttleRate: 200 },
-    { topic: topics.plan, throttleRate: 500 },
-    { topic: topics.odom, throttleRate: 200 },
-    { topic: topics.cmdVel, throttleRate: 200 },
-    { topic: topics.tf, throttleRate: 500 },
-    { topic: topics.tfStatic, throttleRate: 2000 },
-    { topic: topics.batteryState, throttleRate: 1000 },
-    { topic: topics.diagnostics, throttleRate: 1000 },
+    {
+      topic: topics.map,
+      messageType: 'nav_msgs/msg/OccupancyGrid',
+      throttleRate: 1000,
+      required: true,
+    },
+    {
+      topic: topics.keepoutFilterMask,
+      messageType: 'nav_msgs/msg/OccupancyGrid',
+      throttleRate: 1000,
+      required: true,
+    },
+    {
+      topic: topics.amclPose,
+      messageType: 'geometry_msgs/msg/PoseWithCovarianceStamped',
+      throttleRate: 200,
+      required: true,
+    },
+    {
+      topic: topics.plan,
+      messageType: 'nav_msgs/msg/Path',
+      throttleRate: 500,
+      required: true,
+    },
+    {
+      topic: topics.odom,
+      messageType: 'nav_msgs/msg/Odometry',
+      throttleRate: 200,
+      required: false,
+    },
+    {
+      topic: topics.cmdVel,
+      messageType: 'geometry_msgs/msg/Twist',
+      throttleRate: 200,
+      required: false,
+    },
+    {
+      topic: topics.tf,
+      messageType: 'tf2_msgs/msg/TFMessage',
+      throttleRate: 500,
+      required: false,
+    },
+    {
+      topic: topics.tfStatic,
+      messageType: 'tf2_msgs/msg/TFMessage',
+      throttleRate: 2000,
+      required: false,
+    },
+    {
+      topic: topics.batteryState,
+      messageType: 'sensor_msgs/msg/BatteryState',
+      throttleRate: 1000,
+      required: false,
+    },
+    {
+      topic: topics.diagnostics,
+      messageType: 'diagnostic_msgs/msg/DiagnosticArray',
+      throttleRate: 1000,
+      required: false,
+    },
   ].filter((subscription) => subscription.topic)
 }
 
@@ -90,6 +144,12 @@ function createRosbridgeSnapshot(): RuntimeDashboardSnapshot {
       zones: [],
     },
     tasks: [],
+    alarms: {
+      total: 0,
+      critical: 0,
+      warning: 0,
+    },
+    logs: [],
     telemetry: cloneData(DEFAULT_TELEMETRY),
   }
 }
@@ -252,6 +312,9 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
   private tfFrames = new Map<string, RuntimeTfFrame>()
   private reconnectTimer: number | undefined
   private localizationTimer: number | undefined
+  private subscriptionRetryTimer: number | undefined
+  private receivedTopics = new Set<string>()
+  private subscriptionRetryCounts = new Map<string, number>()
   private lastAmclPoseAt: number | null = null
   private disposed = false
 
@@ -285,6 +348,7 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
         this.lastAmclPoseAt = Date.now()
         this.patchConnection('connected')
         this.subscribeTopics()
+        this.startSubscriptionRetry()
         this.startLocalizationWatchdog(onSnapshot)
         onSnapshot(cloneData(this.snapshot))
       }
@@ -294,6 +358,7 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
           const envelope = parseRosbridgeEnvelope(String(event.data))
 
           if (envelope?.op !== 'publish' || !envelope.topic) return
+          this.receivedTopics.add(this.normalizeTopicName(envelope.topic))
 
           const normalized = normalizeRosMessage(envelope.topic, envelope.msg)
 
@@ -318,6 +383,7 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
         }
 
         this.patchConnection('disconnected')
+        this.stopSubscriptionRetry()
         this.stopLocalizationWatchdog()
         onSnapshot(cloneData(this.snapshot))
 
@@ -343,6 +409,7 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
     }
 
     this.stopLocalizationWatchdog()
+    this.stopSubscriptionRetry()
 
     if (!this.socket) return
 
@@ -586,27 +653,79 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
   }
 
   private subscribeTopics() {
+    this.receivedTopics.clear()
+    this.subscriptionRetryCounts.clear()
+
     for (const subscription of buildSubscriptions()) {
-      this.send({
-        op: 'subscribe',
-        id: this.subscriptionId(subscription.topic),
-        topic: subscription.topic,
-        throttle_rate: subscription.throttleRate,
-      })
+      this.subscribeTopic(subscription)
     }
+  }
+
+  private subscribeTopic(subscription: RosbridgeSubscription) {
+    this.send({
+      op: 'subscribe',
+      id: this.subscriptionId(subscription.topic),
+      topic: subscription.topic,
+      type: subscription.messageType,
+      throttle_rate: subscription.throttleRate,
+      queue_length: 1,
+      compression: 'none',
+    })
+  }
+
+  private startSubscriptionRetry() {
+    this.stopSubscriptionRetry()
+
+    this.subscriptionRetryTimer = window.setInterval(() => {
+      if (this.disposed || this.snapshot.connection !== 'connected') return
+
+      let hasPendingRequiredTopic = false
+
+      for (const subscription of buildSubscriptions()) {
+        if (!subscription.required) continue
+
+        const topic = this.normalizeTopicName(subscription.topic)
+        if (this.receivedTopics.has(topic)) continue
+
+        const retries = this.subscriptionRetryCounts.get(topic) ?? 0
+        if (retries >= MAX_SUBSCRIPTION_RETRIES) continue
+
+        hasPendingRequiredTopic = true
+        this.unsubscribeTopic(subscription.topic)
+        this.subscribeTopic(subscription)
+        this.subscriptionRetryCounts.set(topic, retries + 1)
+      }
+
+      if (!hasPendingRequiredTopic) {
+        this.stopSubscriptionRetry()
+      }
+    }, SUBSCRIPTION_RETRY_MS)
+  }
+
+  private stopSubscriptionRetry() {
+    if (!this.subscriptionRetryTimer) return
+
+    window.clearInterval(this.subscriptionRetryTimer)
+    this.subscriptionRetryTimer = undefined
+  }
+
+  private unsubscribeTopic(topic: string, socket = this.socket) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return
+
+    socket.send(
+      JSON.stringify({
+        op: 'unsubscribe',
+        id: this.subscriptionId(topic),
+        topic,
+      }),
+    )
   }
 
   private unsubscribeTopics(socket = this.socket) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return
 
     for (const subscription of buildSubscriptions()) {
-      socket.send(
-        JSON.stringify({
-          op: 'unsubscribe',
-          id: this.subscriptionId(subscription.topic),
-          topic: subscription.topic,
-        }),
-      )
+      this.unsubscribeTopic(subscription.topic, socket)
     }
   }
 
@@ -618,5 +737,11 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
 
   private subscriptionId(topic: string) {
     return `runtime:${topic}`
+  }
+
+  private normalizeTopicName(topic: string) {
+    const value = topic.trim().replace(/\/+$/, '')
+
+    return value.startsWith('/') ? value : `/${value}`
   }
 }

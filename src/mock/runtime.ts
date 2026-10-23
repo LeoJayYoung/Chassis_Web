@@ -236,9 +236,9 @@ export const mockRuntimeDashboard: RuntimeDashboardSnapshot = {
     },
   ],
   alarms: {
-    total: 3,
-    critical: 2,
-    warning: 1,
+    total: 0,
+    critical: 0,
+    warning: 0,
   },
   metrics: [
     {
@@ -260,41 +260,5 @@ export const mockRuntimeDashboard: RuntimeDashboardSnapshot = {
     { id: 'motor-load', label: '电机负载', value: '36', unit: '%', percent: 36, status: 'normal' },
     { id: 'link-delay', label: '通信延迟', value: '18', unit: 'ms', percent: 18, status: 'normal' },
   ],
-  logs: [
-    {
-      id: 'log-001',
-      time: '14:32:08',
-      level: 'info',
-      module: 'nav2',
-      message: '任务 TASK-0042 已下发：目标点 B2',
-    },
-    {
-      id: 'log-002',
-      time: '14:31:55',
-      level: 'warn',
-      module: 'nav2',
-      message: '检测到临时障碍物，路径已重新规划',
-    },
-    {
-      id: 'log-003',
-      time: '14:30:11',
-      level: 'info',
-      module: 'ros',
-      message: '地图数据更新完成',
-    },
-    {
-      id: 'log-004',
-      time: '14:28:40',
-      level: 'info',
-      module: 'system',
-      message: '电量 82%，处于正常工作区间',
-    },
-    {
-      id: 'log-005',
-      time: '14:27:03',
-      level: 'warn',
-      module: 'stm32',
-      message: '急停释放，恢复导航状态',
-    },
-  ],
+  logs: [],
 }

@@ -361,10 +361,6 @@ class RosbridgeTaskCommandClient implements TaskCommandClient {
   subscribeTaskEvents(listener: TaskCommandEventListener) {
     this.listeners.add(listener)
 
-    if (runtimeApiConfig.mode === 'rosbridge') {
-      void this.ensureSocket().catch(() => undefined)
-    }
-
     return () => {
       this.listeners.delete(listener)
     }

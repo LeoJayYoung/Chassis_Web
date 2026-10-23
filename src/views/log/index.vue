@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRobotRuntimeStore } from '../../stores/robotRuntime'
 import type { RuntimeLogEntry, RuntimeLogLevel, RuntimeLogModule } from '../../types'
@@ -175,6 +175,14 @@ function scrollLogsToNewest() {
   logViewport.value.scrollTop = 0
 }
 
+function handleLogScroll() {
+  if (!logViewport.value || !autoScroll.value) return
+
+  if (logViewport.value.scrollTop > 24) {
+    autoScroll.value = false
+  }
+}
+
 function escapeCsvCell(value: string) {
   return `"${value.replaceAll('"', '""')}"`
 }
@@ -197,9 +205,18 @@ function exportCsv() {
   URL.revokeObjectURL(url)
 }
 
-watch([eventLogs, autoScroll], async () => {
-  await nextTick()
-  scrollLogsToNewest()
+watch(
+  () => runtime.value.logs[0]?.id,
+  (currentId, previousId) => {
+    if (!currentId || currentId === previousId || !autoScroll.value) return
+    window.requestAnimationFrame(scrollLogsToNewest)
+  },
+)
+
+watch(autoScroll, (enabled) => {
+  if (enabled) {
+    window.requestAnimationFrame(scrollLogsToNewest)
+  }
 })
 </script>
 
@@ -359,7 +376,11 @@ watch([eventLogs, autoScroll], async () => {
           <span>消息</span>
         </div>
 
-        <div ref="logViewport" class="event-log-body">
+        <div
+          ref="logViewport"
+          class="event-log-body"
+          @scroll.passive="handleLogScroll"
+        >
           <div v-if="!eventLogs.length" class="empty-state">当前筛选条件下暂无日志</div>
           <div
             v-for="log in eventLogs"
@@ -662,6 +683,19 @@ watch([eventLogs, autoScroll], async () => {
   min-width: 0;
 }
 
+.alarms-section {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 270px;
+  min-height: 270px;
+}
+
+.alarms-section > .empty-state {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+}
+
 .section-heading {
   justify-content: space-between;
   gap: 16px;
@@ -725,7 +759,11 @@ watch([eventLogs, autoScroll], async () => {
 
 .alarm-list {
   display: grid;
+  grid-auto-rows: 108px;
   gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 3px;
 }
 
 .alarm-card {
@@ -733,7 +771,9 @@ watch([eventLogs, autoScroll], async () => {
   align-items: center;
   justify-content: space-between;
   gap: 0;
-  min-height: 88px;
+  height: 108px;
+  min-height: 108px;
+  overflow: hidden;
   padding: 16px 18px 16px 16px;
   border: 1px solid var(--color-border);
   border-left: 4px solid var(--color-warning);
@@ -771,6 +811,7 @@ watch([eventLogs, autoScroll], async () => {
 .alarm-card__content {
   min-width: 0;
   flex: 1;
+  overflow: hidden;
 }
 
 .alarm-card__meta {
@@ -850,13 +891,18 @@ watch([eventLogs, autoScroll], async () => {
   text-overflow: ellipsis;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+  min-height: 22px;
+  max-height: 45px;
 }
 
 .alarm-card__detail {
+  overflow: hidden;
   margin: 8px 0 0;
   color: var(--color-muted);
   font-size: 13px;
   line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .alarm-card__actions {
@@ -946,6 +992,9 @@ watch([eventLogs, autoScroll], async () => {
 }
 
 .event-log-card {
+  display: grid;
+  grid-template-rows: 50px minmax(0, 1fr) 40px;
+  height: 390px;
   overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: 16px;
@@ -977,8 +1026,15 @@ watch([eventLogs, autoScroll], async () => {
 }
 
 .event-log-body {
-  max-height: 420px;
+  min-height: 0;
   overflow-y: auto;
+}
+
+.event-log-body > .empty-state {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  padding: 16px;
 }
 
 .event-log-row {
@@ -1121,6 +1177,21 @@ watch([eventLogs, autoScroll], async () => {
     align-items: flex-start;
     flex-direction: column;
     gap: 8px;
+    height: auto;
+    min-height: 108px;
+    overflow: visible;
+  }
+
+  .alarms-section {
+    height: auto;
+    min-height: 0;
+  }
+
+  .alarm-list {
+    grid-auto-rows: auto;
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
   }
 
   .alarm-card__actions {
@@ -1143,6 +1214,11 @@ watch([eventLogs, autoScroll], async () => {
     justify-content: center;
     gap: 4px;
     padding: 9px 14px;
+  }
+
+  .event-log-card {
+    grid-template-rows: 50px minmax(220px, 1fr) auto;
+    height: 390px;
   }
 }
 </style>
