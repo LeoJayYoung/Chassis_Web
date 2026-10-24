@@ -71,12 +71,17 @@ export function createScheduler({ store, bus, dispatchRoute }) {
         enabled: 0,
         next_run_at: null,
       })
+      bus.emit('schedule-deleted', { id: schedule.id })
       return
     }
 
     store.updateSchedule(schedule.id, {
       next_run_at: nextAfterSuccess(schedule, scheduledFor, Date.now()),
     })
+    bus.emit(
+      'schedule-updated',
+      store.listSchedules().find((item) => item.id === schedule.id),
+    )
   }
 
   function recover() {
@@ -146,6 +151,7 @@ export function createScheduler({ store, bus, dispatchRoute }) {
         updated_at: now,
       })
       store.updateSchedule(schedule.id, { enabled: 0, next_run_at: null })
+      bus.emit('schedule-deleted', { id: schedule.id })
       log(
         'error',
         `定时计划「${schedule.name}」找不到路线 ${schedule.route_id}，已停用`,
@@ -289,6 +295,32 @@ export function createScheduler({ store, bus, dispatchRoute }) {
     return schedule
   }
 
+  function cancelSchedule(id) {
+    const schedule = store.listSchedules().find((item) => item.id === id)
+    if (!schedule) throw new Error(`定时计划 ${id} 不存在`)
+
+    store.updateSchedule(id, { enabled: 0, next_run_at: null })
+    log('warn', `定时计划「${schedule.name}」已取消`)
+    bus.emit('schedule-deleted', { id })
+    return { id, enabled: 0 }
+  }
+
+  function runNow(id) {
+    const schedule = store.listSchedules().find((item) => item.id === id)
+    if (!schedule) throw new Error(`定时计划 ${id} 不存在`)
+    const route = schedule.route_id ? store.getRoute(schedule.route_id) : null
+    if (!route) throw new Error(`定时计划 ${id} 对应路线不存在`)
+
+    return dispatchRoute({
+      targets: route.targets,
+      routeId: route.id,
+      mapId: route.map_id ?? null,
+      dispatchedBy: 'human',
+      scheduleId: schedule.id,
+      scheduledFor: Date.now(),
+    })
+  }
+
   function start() {
     recover()
     timer = setInterval(tick, TICK_MS)
@@ -301,5 +333,12 @@ export function createScheduler({ store, bus, dispatchRoute }) {
     }
   }
 
-  return { start, stop, addSchedule, computeNextRun }
+  return {
+    start,
+    stop,
+    addSchedule,
+    cancelSchedule,
+    runNow,
+    computeNextRun,
+  }
 }

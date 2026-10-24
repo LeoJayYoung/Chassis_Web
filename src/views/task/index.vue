@@ -13,11 +13,26 @@ import type {
 type TaskStatus = RuntimeTaskStatus
 type TaskType = RuntimeTaskType
 type TimelineStatus = RuntimeTaskTimelineStatus
+type TaskTab = 'runs' | 'schedules' | 'routes'
 
 const router = useRouter()
 const runtimeStore = useRobotRuntimeStore()
 const { runtime } = storeToRefs(runtimeStore)
-const tasks = computed(() => runtime.value.tasks)
+const tasks = computed(() => runtime.value.taskRuns)
+const schedules = computed(() => runtime.value.schedules)
+const routeTemplates = computed(() => runtime.value.routeTemplates)
+const activeTab = ref<TaskTab>('runs')
+const taskTabs: Array<{ value: TaskTab; label: string }> = [
+  { value: 'runs', label: '任务记录' },
+  { value: 'schedules', label: '巡检计划' },
+  { value: 'routes', label: '路线模板' },
+]
+
+function tabCount(tab: TaskTab) {
+  if (tab === 'runs') return tasks.value.length
+  if (tab === 'schedules') return schedules.value.length
+  return routeTemplates.value.length
+}
 
 const selectedTaskId = ref('')
 const draggedTaskIndex = ref<number | null>(null)
@@ -31,14 +46,20 @@ const taskCounts = computed(() => ({
   Running: tasks.value.filter((task) => task.status === 'running').length,
   Pending: tasks.value.filter((task) => task.status === 'idle').length,
   Paused: tasks.value.filter((task) => task.status === 'paused').length,
+  Unknown: tasks.value.filter((task) => task.status === 'unknown').length,
   Completed: tasks.value.filter((task) => task.status === 'completed').length,
-  Failed: tasks.value.filter((task) => task.status === 'failed' || task.status === 'canceled').length,
+  Failed: tasks.value.filter(
+    (task) =>
+      task.status === 'failed' ||
+      task.status === 'canceled' ||
+      task.status === 'unknown',
+  ).length,
 }))
 
 const statCards = computed(() => [
   { label: '待执行', count: taskCounts.value.Pending, status: 'idle' as const },
   { label: '已完成', count: taskCounts.value.Completed, status: 'completed' as const },
-  { label: '异常/取消', count: taskCounts.value.Failed, status: 'failed' as const },
+  { label: '异常/待核对', count: taskCounts.value.Failed, status: 'failed' as const },
 ])
 
 const tableHeaders = [
@@ -70,6 +91,7 @@ const statusLabels: Record<TaskStatus, string> = {
   idle: '待执行',
   running: '执行中',
   paused: '已暂停',
+  unknown: '待核对',
   completed: '已完成',
   failed: '失败',
   canceled: '已取消',
@@ -92,6 +114,7 @@ const timelineLabels: Record<TimelineStatus, string> = {
   triggered: 'Triggered',
   running: 'Running',
   paused: 'Paused',
+  unknown: 'Needs Review',
   completed: 'Completed',
   failed: 'Failed',
   canceled: 'Cancelled',
@@ -102,6 +125,7 @@ const timelineLabels: Record<TimelineStatus, string> = {
 function statusClass(status: TaskStatus | TimelineStatus) {
   if (status === 'idle') return 'is-pending'
   if (status === 'canceled') return 'is-cancelled'
+  if (status === 'unknown') return 'is-unknown'
   return `is-${status}`
 }
 
@@ -136,7 +160,10 @@ function formatTimestamp(timestamp: number) {
 }
 
 function taskDispatchLabel(task: RuntimeTaskRecord) {
-  return task.dispatchMode === 'scheduled' ? '定时' : '立即'
+  if (task.dispatchMode === 'scheduled') return '自动触发'
+  if (task.dispatchMode === 'manual_schedule') return '手动执行计划'
+  if (task.dispatchMode === 'retry') return '重新执行'
+  return '立即'
 }
 
 function taskPlanTime(task: RuntimeTaskRecord) {
@@ -151,8 +178,35 @@ function taskStatusText(task: RuntimeTaskRecord) {
   return statusLabels[task.status]
 }
 
+function scheduleRuleText(schedule: (typeof schedules.value)[number]) {
+  if (schedule.mode === 'interval') {
+    return `每 ${schedule.intervalMinutes ?? '--'} 分钟`
+  }
+  if (schedule.mode === 'daily') {
+    return `每天 ${schedule.timeOfDay ?? '--:--'}`
+  }
+  return schedule.scheduledAt
+    ? formatTimestamp(schedule.scheduledAt).full
+    : '指定日期'
+}
+
+function scheduleNextRun(schedule: (typeof schedules.value)[number]) {
+  return schedule.nextRunAt
+    ? formatTimestamp(schedule.nextRunAt).full
+    : '等待计算'
+}
+
+function runScheduleNow(scheduleId: string) {
+  runtimeStore.runScheduleNow(scheduleId)
+}
+
+function cancelSchedule(scheduleId: string) {
+  runtimeStore.cancelSchedule(scheduleId)
+}
+
 function selectTask(task: RuntimeTaskRecord) {
   selectedTaskId.value = task.id
+  void runtimeStore.loadTaskDetail(task.id)
 }
 
 function goToMapWorkbench() {
@@ -187,11 +241,11 @@ function closeDeleteModal() {
   pendingDeleteTask.value = null
 }
 
-function confirmDeleteTask() {
+async function confirmDeleteTask() {
   if (!pendingDeleteTask.value) return
 
   const taskId = pendingDeleteTask.value.id
-  const deleted = runtimeStore.deleteTask(taskId)
+  const deleted = await runtimeStore.deleteTask(taskId)
 
   if (deleted) {
     selectedTaskId.value = ''
@@ -230,14 +284,29 @@ function dragEnd() {
 
       <div class="tasks-header__actions">
         <button class="toolbar-button" type="button">导入 / 导出</button>
-        <button class="toolbar-button" type="button">任务模板</button>
+        <button class="toolbar-button" type="button" @click="activeTab = 'routes'">
+          路线模板
+        </button>
         <button class="toolbar-button toolbar-button--primary" type="button" @click="goToMapWorkbench">
           新建任务
         </button>
       </div>
     </header>
 
-    <section class="stats-grid" aria-label="Task statistics">
+    <nav class="task-tabs" aria-label="任务管理视图">
+      <button
+        v-for="tab in taskTabs"
+        :key="tab.value"
+        type="button"
+        :class="{ 'is-active': activeTab === tab.value }"
+        @click="activeTab = tab.value"
+      >
+        {{ tab.label }}
+        <span>{{ tabCount(tab.value) }}</span>
+      </button>
+    </nav>
+
+    <section v-if="activeTab === 'runs'" class="stats-grid" aria-label="Task statistics">
       <article class="stat-card stat-card--dark">
         <span>当前执行</span>
         <strong>{{ taskCounts.Running }}</strong>
@@ -261,7 +330,7 @@ function dragEnd() {
       </article>
     </section>
 
-    <main class="tasks-content">
+    <main v-if="activeTab === 'runs'" class="tasks-content">
       <section class="task-table-card" aria-label="Task list">
         <div class="task-table">
           <div class="task-row task-row--head">
@@ -391,13 +460,26 @@ function dragEnd() {
                   </button>
                 </template>
                 <button
-                  v-if="task.status === 'failed' || task.status === 'canceled'"
+                  v-if="task.status === 'unknown'"
+                  class="action-button is-danger"
+                  type="button"
+                  :disabled="task.transitioning"
+                  @click="cancelTask(task)"
+                >
+                  取消
+                </button>
+                <button
+                  v-if="
+                    task.status === 'failed' ||
+                    task.status === 'canceled' ||
+                    task.status === 'unknown'
+                  "
                   class="action-button is-primary"
                   type="button"
                   :disabled="task.transitioning"
                   @click="retryTask(task)"
                 >
-                  重试
+                  {{ task.status === 'unknown' ? '重新执行' : '重试' }}
                 </button>
                 <span v-if="task.status === 'completed'" class="empty-mark">-</span>
                 <button class="action-button is-ghost" type="button" @click="selectedTaskId = task.id">
@@ -519,6 +601,72 @@ function dragEnd() {
       </div>
     </main>
 
+    <main v-else-if="activeTab === 'schedules'" class="management-list">
+      <article
+        v-for="schedule in schedules"
+        :key="schedule.id"
+        class="management-row"
+      >
+        <div class="management-row__main">
+          <span class="management-row__eyebrow">SCHEDULE</span>
+          <strong>{{ schedule.name }}</strong>
+          <small>{{ schedule.routeName }}</small>
+        </div>
+        <div class="management-row__metric">
+          <span>执行规则</span>
+          <strong>{{ scheduleRuleText(schedule) }}</strong>
+        </div>
+        <div class="management-row__metric">
+          <span>下次执行</span>
+          <strong>{{ scheduleNextRun(schedule) }}</strong>
+        </div>
+        <div class="management-row__metric">
+          <span>路线</span>
+          <strong>{{ schedule.targetNames.join(' → ') || '未配置' }}</strong>
+        </div>
+        <div class="management-row__actions">
+          <button
+            class="action-button is-success"
+            type="button"
+            @click="runScheduleNow(schedule.id)"
+          >
+            立即执行
+          </button>
+          <button
+            class="action-button is-danger"
+            type="button"
+            @click="cancelSchedule(schedule.id)"
+          >
+            取消计划
+          </button>
+        </div>
+      </article>
+      <div v-if="!schedules.length" class="management-empty">
+        暂无巡检计划，请从 Map Control 创建。
+      </div>
+    </main>
+
+    <main v-else class="route-template-grid">
+      <article
+        v-for="route in routeTemplates"
+        :key="route.id"
+        class="route-template-card"
+      >
+        <div>
+          <span>ROUTE TEMPLATE</span>
+          <strong>{{ route.name }}</strong>
+        </div>
+        <p>{{ route.targets.map((target) => target.name).join(' → ') }}</p>
+        <footer>
+          <span>{{ route.targets.length }} 个航点</span>
+          <span>{{ formatTimestamp(route.createdAt).full }}</span>
+        </footer>
+      </article>
+      <div v-if="!routeTemplates.length" class="management-empty">
+        暂无路线模板，请在地图页选择目标点并保存模板。
+      </div>
+    </main>
+
     <Teleport to="body">
       <div v-if="pendingDeleteTask" class="confirm-backdrop" role="presentation" @click="closeDeleteModal">
         <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-task-title" @click.stop>
@@ -543,12 +691,56 @@ function dragEnd() {
 <style scoped>
 .tasks-page {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   gap: 20px;
   height: 100%;
   overflow: auto;
   padding: 16px 20px 24px;
   color: var(--color-text);
+}
+
+.task-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.task-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.task-tabs button.is-active {
+  border-bottom-color: var(--color-primary);
+  color: var(--color-primary-dark);
+}
+
+.task-tabs button span {
+  min-width: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--color-neutral-bg);
+  color: var(--color-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.task-tabs button.is-active span {
+  background: var(--color-primary-bg);
+  color: var(--color-primary-strong);
 }
 
 .tasks-header {
@@ -958,6 +1150,12 @@ function dragEnd() {
   color: var(--color-warning-strong);
 }
 
+.status-badge.is-unknown {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-strong);
+}
+
 .status-badge.is-completed {
   border-color: var(--color-primary-border);
   background: var(--color-primary-bg);
@@ -982,6 +1180,10 @@ function dragEnd() {
 }
 
 .status-dot.is-paused {
+  background: var(--color-warning);
+}
+
+.status-dot.is-unknown {
   background: var(--color-warning);
 }
 
@@ -1215,6 +1417,12 @@ function dragEnd() {
   color: var(--color-warning-strong);
 }
 
+.feedback-box.is-unknown {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-strong);
+}
+
 .feedback-box.is-failed,
 .feedback-box.is-cancelled {
   border-color: var(--color-error-border);
@@ -1266,6 +1474,137 @@ function dragEnd() {
 .timeline-item i.is-paused {
   border-color: var(--color-warning-bg);
   background: var(--color-warning);
+}
+
+.timeline-item i.is-unknown {
+  border-color: var(--color-warning-bg);
+  background: var(--color-warning);
+}
+
+.management-list {
+  grid-row: 3 / -1;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.management-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.35fr) repeat(3, minmax(150px, 1fr)) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 18px 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-card);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+}
+
+.management-row__main,
+.management-row__metric {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.management-row__eyebrow,
+.management-row__metric span {
+  color: var(--color-subtle);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.management-row__main strong {
+  color: var(--color-text);
+  font-size: 15px;
+}
+
+.management-row__main small {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-row__metric strong {
+  overflow: hidden;
+  color: var(--color-text-strong);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-row__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.route-template-grid {
+  grid-row: 3 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-content: start;
+  gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.route-template-card {
+  display: grid;
+  gap: 16px;
+  min-height: 170px;
+  padding: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-card);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+}
+
+.route-template-card > div {
+  display: grid;
+  gap: 5px;
+}
+
+.route-template-card > div span {
+  color: var(--color-subtle);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.route-template-card > div strong {
+  color: var(--color-text);
+  font-size: 16px;
+}
+
+.route-template-card p {
+  margin: 0;
+  color: var(--color-text-strong);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.route-template-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: auto;
+  color: var(--color-subtle);
+  font-size: 11px;
+}
+
+.management-empty {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 12px;
+  color: var(--color-subtle);
+  font-size: 13px;
 }
 
 .timeline-item i.is-failed,
@@ -1470,6 +1809,23 @@ function dragEnd() {
   .task-table-card {
     overflow-x: auto;
   }
+
+  .management-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .management-row__main,
+  .management-row__actions {
+    grid-column: 1 / -1;
+  }
+
+  .management-row__actions {
+    justify-content: flex-start;
+  }
+
+  .route-template-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 620px) {
@@ -1484,6 +1840,19 @@ function dragEnd() {
   .task-detail {
     width: 100vw;
     border-radius: 0;
+  }
+
+  .task-tabs {
+    overflow-x: auto;
+  }
+
+  .task-tabs button {
+    flex: none;
+  }
+
+  .management-row,
+  .route-template-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

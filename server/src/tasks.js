@@ -96,7 +96,7 @@ export function createTaskService({ store, rosbridge, bus }) {
     const startedAt = Date.now()
     const run = {
       id: `RUN-${randomUUID()}`,
-      taskNo: `TASK-${randomUUID().slice(0, 8)}`,
+      taskNo: store.nextTaskNo(),
       routeId: routeId ?? null,
       mapId: mapId ?? null,
       type:
@@ -299,7 +299,38 @@ export function createTaskService({ store, rosbridge, bus }) {
       return { runId, status: 'canceled' }
     }
 
-    if (!rosbridge.cancelGoal(runId)) {
+    let cancelSent = false
+    try {
+      cancelSent = rosbridge.cancelGoal(runId)
+    } catch (error) {
+      if (run.status !== 'unknown') throw error
+    }
+
+    if (run.status === 'unknown' && !cancelSent) {
+      store.transaction(() => {
+        store.updateTaskRun(runId, {
+          status: 'canceled',
+          completedAt: now,
+          updatedAt: now,
+          activeGoalId: null,
+          activeAction: null,
+          failureReason: '任务状态未知，由操作员人工取消',
+        })
+        store.appendTaskRunEvent({
+          runId,
+          event: 'canceled',
+          ts: now,
+          source,
+          note: 'unknown 状态人工取消，未确认原 goal',
+        })
+      })
+      rosbridge.clearGoal(runId)
+      emitLog('warn', `待核对任务 ${run.task_no} 已由操作员取消`)
+      emitRun(runId)
+      return { runId, status: 'canceled' }
+    }
+
+    if (!cancelSent) {
       throw new Error(`任务 ${runId} 没有可取消的活动 goal`)
     }
     store.transaction(() => {
@@ -315,6 +346,46 @@ export function createTaskService({ store, rosbridge, bus }) {
     emitLog('warn', `任务 ${run.task_no} 已请求取消，等待 Nav2 确认`)
     emitRun(runId)
     return { runId, status: 'canceling' }
+  }
+
+  function retryRun(runId, source = 'human') {
+    const run = store.getTaskRun(runId)
+    if (!run) throw new Error(`任务 ${runId} 不存在`)
+    if (!TERMINAL_STATUSES.includes(run.status) && run.status !== 'unknown') {
+      throw new Error(`任务 ${runId} 当前状态为 ${run.status}，无法重试`)
+    }
+
+    if (run.status === 'unknown') {
+      const now = Date.now()
+      store.transaction(() => {
+        store.updateTaskRun(runId, {
+          status: 'failed',
+          completedAt: now,
+          updatedAt: now,
+          activeGoalId: null,
+          activeAction: null,
+          failureReason: '待核对任务由操作员选择重新执行',
+        })
+        store.appendTaskRunEvent({
+          runId,
+          event: 'failed',
+          ts: now,
+          source,
+          note: 'unknown 状态人工结束并重新执行',
+        })
+      })
+      rosbridge.clearGoal(runId)
+      emitRun(runId)
+    }
+
+    return dispatchRoute({
+      targets: run.targets,
+      routeId: run.route_id,
+      mapId: run.map_id,
+      dispatchedBy: 'retry',
+      scheduleId: null,
+      scheduledFor: null,
+    })
   }
 
   function handleActionFeedback(payload) {
@@ -521,6 +592,7 @@ export function createTaskService({ store, rosbridge, bus }) {
     pauseRun,
     resumeRun,
     cancelRun,
+    retryRun,
     handleActionFeedback,
     handleActionResult,
     recoverInterruptedRuns,

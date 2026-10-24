@@ -1,21 +1,31 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import MapContainer from '../../components/map/MapContainer.vue'
 import { useRobotRuntimeStore } from '../../stores/robotRuntime'
 import type { MapPoint, NavigationMode, TaskStatus, TaskType } from '../../types'
 
 type DispatchMode = 'immediate' | 'scheduled'
+type ScheduleMode = 'once' | 'interval' | 'daily'
 
 const runtimeStore = useRobotRuntimeStore()
-const { mapDashboard: dashboard } = storeToRefs(runtimeStore)
+const {
+  mapDashboard: dashboard,
+  runtime,
+  backendEnabled,
+} = storeToRefs(runtimeStore)
 const targetSelectionMode = ref(false)
 const targetDraft = ref<MapPoint | null>(null)
 const targetDraftName = ref('')
 const selectedTaskType = ref<TaskType>(dashboard.value.task.type)
 const selectedCruiseTargetIds = ref<string[]>([])
 const selectedDispatchMode = ref<DispatchMode>('immediate')
+const selectedScheduleMode = ref<ScheduleMode>('once')
 const scheduledAtInput = ref('')
+const intervalMinutes = ref(60)
+const dailyTimeInput = ref('09:00')
+const selectedRouteTemplateId = ref('')
+const routeTemplateName = ref('')
 const actionMessage = ref('')
 
 const navigationModeLabels: Record<NavigationMode, string> = {
@@ -33,6 +43,7 @@ const taskStatusLabels: Record<TaskStatus, string> = {
   idle: '空闲',
   running: '执行中',
   paused: '已暂停',
+  unknown: '待核对',
   canceled: '已取消',
   completed: '已完成',
   failed: '失败',
@@ -54,6 +65,14 @@ const modeOptions = [
   'multi_point_cruise',
   'return_home',
 ] as const
+const scheduleModeOptions: Array<{
+  value: ScheduleMode
+  label: string
+}> = [
+  { value: 'once', label: '指定日期' },
+  { value: 'daily', label: '每天' },
+  { value: 'interval', label: '按间隔' },
+]
 
 const activeTarget = computed(
   () => dashboard.value.targets.find((item) => item.id === dashboard.value.activeTargetId) ?? null,
@@ -66,6 +85,15 @@ const selectedCruiseTargets = computed(() =>
   }),
 )
 const selectedTargetSummary = computed(() => {
+  if (
+    selectedDispatchMode.value === 'scheduled' &&
+    selectedRouteTemplateId.value
+  ) {
+    const route = runtime.value.routeTemplates.find(
+      (item) => item.id === selectedRouteTemplateId.value,
+    )
+    return route?.targets.map((target) => target.name).join(' → ') ?? '路线模板'
+  }
   if (selectedTaskType.value === 'multi_point_cruise') {
     return selectedCruiseTargets.value.length
       ? selectedCruiseTargets.value.map((target) => target.name).join(' → ')
@@ -78,6 +106,8 @@ const selectedTargetSummary = computed(() => {
 const canDispatch = computed(
   () => {
     const hasTarget =
+      (selectedDispatchMode.value === 'scheduled' &&
+        Boolean(selectedRouteTemplateId.value)) ||
       selectedTaskType.value === 'return_home' ||
       (selectedTaskType.value === 'multi_point_cruise'
         ? selectedCruiseTargetIds.value.length >= 2
@@ -87,9 +117,17 @@ const canDispatch = computed(
 
     if (selectedDispatchMode.value === 'immediate') return true
 
-    return scheduledAtTimestamp.value !== null && scheduledAtTimestamp.value > Date.now()
+    return scheduleIsValid.value
   },
 )
+const currentRouteTargetIds = computed(() => {
+  if (selectedTaskType.value === 'multi_point_cruise') {
+    return selectedCruiseTargetIds.value
+  }
+  return dashboard.value.activeTargetId
+    ? [dashboard.value.activeTargetId]
+    : []
+})
 const canPause = computed(() => dashboard.value.task.status === 'running')
 const canContinue = computed(() => dashboard.value.task.status === 'paused')
 const canCancel = computed(() =>
@@ -102,6 +140,30 @@ const scheduledAtTimestamp = computed(() => {
   const timestamp = new Date(scheduledAtInput.value).getTime()
 
   return Number.isFinite(timestamp) ? timestamp : null
+})
+const scheduleIsValid = computed(() => {
+  if (selectedScheduleMode.value === 'interval') {
+    return Number.isInteger(intervalMinutes.value) && intervalMinutes.value > 0
+  }
+  if (selectedScheduleMode.value === 'daily') {
+    return /^([01]\d|2[0-3]):[0-5]\d$/.test(dailyTimeInput.value)
+  }
+  return scheduledAtTimestamp.value !== null && scheduledAtTimestamp.value > Date.now()
+})
+
+watch(selectedRouteTemplateId, (routeId) => {
+  if (!routeId) return
+
+  const route = runtime.value.routeTemplates.find((item) => item.id === routeId)
+  if (!route) return
+
+  const visibleTargetIds = route.targets
+    .map((target) => target.id)
+    .filter((targetId) =>
+      dashboard.value.targets.some((target) => target.id === targetId),
+    )
+  selectedCruiseTargetIds.value = visibleTargetIds
+  runtimeStore.setActiveTarget(visibleTargetIds.at(-1))
 })
 
 function toDatetimeLocalValue(timestamp: number) {
@@ -123,7 +185,7 @@ function formatScheduleTime(timestamp: number) {
 
 function taskStatusClass(status: TaskStatus) {
   if (status === 'running' || status === 'completed') return 'is-good'
-  if (status === 'paused') return 'is-warning'
+  if (status === 'paused' || status === 'unknown') return 'is-warning'
   if (status === 'failed' || status === 'canceled') return 'is-error'
   return 'is-muted'
 }
@@ -248,13 +310,42 @@ function selectDispatchMode(mode: DispatchMode) {
   }
 }
 
-function dispatchTask() {
+function selectScheduleMode(mode: ScheduleMode) {
+  selectedScheduleMode.value = mode
+
+  if (mode === 'once' && !scheduledAtInput.value) {
+    scheduledAtInput.value = toDatetimeLocalValue(Date.now() + 5 * 60_000)
+  }
+}
+
+async function saveCurrentRouteTemplate() {
+  if (!currentRouteTargetIds.value.length) {
+    actionMessage.value = '请先选择目标点，再保存路线模板。'
+    return
+  }
+
+  const routeId = await runtimeStore.createRouteTemplate(
+    routeTemplateName.value.trim() || '未命名巡检路线',
+    currentRouteTargetIds.value,
+  )
+  if (!routeId) {
+    actionMessage.value = '路线模板保存失败，请检查后端连接。'
+    return
+  }
+
+  selectedRouteTemplateId.value = routeId
+  routeTemplateName.value = ''
+  actionMessage.value = '路线模板已保存，可用于创建多个巡检计划。'
+}
+
+async function dispatchTask() {
   const scheduledAt =
-    selectedDispatchMode.value === 'scheduled'
+    selectedDispatchMode.value === 'scheduled' &&
+    selectedScheduleMode.value === 'once'
       ? (scheduledAtTimestamp.value ?? undefined)
       : undefined
 
-  const taskId = runtimeStore.createTask({
+  const taskId = await runtimeStore.createTask({
     type: selectedTaskType.value,
     targetPointId:
       selectedTaskType.value === 'single_point_navigation'
@@ -265,7 +356,27 @@ function dispatchTask() {
         ? selectedCruiseTargetIds.value
         : undefined,
     dispatchMode: selectedDispatchMode.value,
+    scheduleMode:
+      selectedDispatchMode.value === 'scheduled'
+        ? selectedScheduleMode.value
+        : undefined,
     scheduledAt,
+    intervalMinutes:
+      selectedScheduleMode.value === 'interval'
+        ? intervalMinutes.value
+        : undefined,
+    timeOfDay:
+      selectedScheduleMode.value === 'daily'
+        ? dailyTimeInput.value
+        : undefined,
+    routeTemplateId:
+      selectedDispatchMode.value === 'scheduled'
+        ? selectedRouteTemplateId.value || undefined
+        : undefined,
+    routeTemplateName:
+      selectedDispatchMode.value === 'scheduled'
+        ? routeTemplateName.value.trim() || undefined
+        : undefined,
   })
 
   if (!taskId) {
@@ -277,8 +388,12 @@ function dispatchTask() {
   }
 
   actionMessage.value =
-    selectedDispatchMode.value === 'scheduled' && scheduledAt
-      ? `定时任务 ${taskId} 已创建，计划 ${formatScheduleTime(scheduledAt)} 执行。`
+    selectedDispatchMode.value === 'scheduled'
+      ? selectedScheduleMode.value === 'once' && scheduledAt
+        ? `定时任务 ${taskId} 已创建，计划 ${formatScheduleTime(scheduledAt)} 执行。`
+        : selectedScheduleMode.value === 'interval'
+          ? `巡检计划 ${taskId} 已创建，每 ${intervalMinutes.value} 分钟执行。`
+          : `巡检计划 ${taskId} 已创建，每天 ${dailyTimeInput.value} 执行。`
       : `任务 ${taskId} 已创建并同步到任务页。`
 
   if (selectedTaskType.value === 'multi_point_cruise') {
@@ -507,13 +622,104 @@ function cancelCurrentTask() {
             </button>
           </div>
 
-          <label v-if="selectedDispatchMode === 'scheduled'" class="schedule-field">
+          <div
+            v-if="selectedDispatchMode === 'scheduled'"
+            class="dispatch-mode-strip"
+            aria-label="定时规则"
+          >
+            <button
+              v-for="option in scheduleModeOptions"
+              :key="option.value"
+              class="mode-chip"
+              :class="{ 'is-active': selectedScheduleMode === option.value }"
+              type="button"
+              @click="selectScheduleMode(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+
+          <div
+            v-if="selectedDispatchMode === 'scheduled' && backendEnabled"
+            class="route-template-control"
+          >
+            <label class="schedule-field">
+              <span>路线模板</span>
+              <select v-model="selectedRouteTemplateId">
+                <option value="">使用当前选择并保存新模板</option>
+                <option
+                  v-for="route in runtime.routeTemplates"
+                  :key="route.id"
+                  :value="route.id"
+                >
+                  {{ route.name }}
+                </option>
+              </select>
+            </label>
+
+            <div v-if="!selectedRouteTemplateId" class="route-template-create">
+              <input
+                v-model="routeTemplateName"
+                type="text"
+                maxlength="40"
+                placeholder="路线模板名称"
+                aria-label="路线模板名称"
+              />
+              <button
+                class="panel-button panel-button--soft"
+                type="button"
+                @click="saveCurrentRouteTemplate"
+              >
+                保存模板
+              </button>
+            </div>
+          </div>
+
+          <label
+            v-if="
+              selectedDispatchMode === 'scheduled' &&
+              selectedScheduleMode === 'once'
+            "
+            class="schedule-field"
+          >
             <span>计划执行时间</span>
             <input
               v-model="scheduledAtInput"
               type="datetime-local"
               :min="minScheduleDateTime"
               aria-label="计划执行时间"
+            />
+          </label>
+
+          <label
+            v-if="
+              selectedDispatchMode === 'scheduled' &&
+              selectedScheduleMode === 'daily'
+            "
+            class="schedule-field"
+          >
+            <span>每日执行时间</span>
+            <input
+              v-model="dailyTimeInput"
+              type="time"
+              aria-label="每日执行时间"
+            />
+          </label>
+
+          <label
+            v-if="
+              selectedDispatchMode === 'scheduled' &&
+              selectedScheduleMode === 'interval'
+            "
+            class="schedule-field"
+          >
+            <span>执行间隔（分钟）</span>
+            <input
+              v-model.number="intervalMinutes"
+              type="number"
+              min="1"
+              step="1"
+              aria-label="执行间隔分钟数"
             />
           </label>
 
@@ -1086,7 +1292,9 @@ function cancelCurrentTask() {
   font-weight: 600;
 }
 
-.schedule-field input {
+.schedule-field input,
+.schedule-field select,
+.route-template-create input {
   width: 100%;
   min-height: 38px;
   padding: 0 10px;
@@ -1099,9 +1307,22 @@ function cancelCurrentTask() {
   font-size: 12px;
 }
 
-.schedule-field input:focus {
+.schedule-field input:focus,
+.schedule-field select:focus,
+.route-template-create input:focus {
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+}
+
+.route-template-control {
+  display: grid;
+  gap: 8px;
+}
+
+.route-template-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
 }
 
 .map-page__status-monitor {

@@ -1,6 +1,6 @@
 import type { RuntimeDashboardSnapshot } from '../types'
 
-export type RuntimeDataSourceMode = 'mock' | 'real' | 'rosbridge'
+export type RuntimeDataSourceMode = 'mock' | 'rosbridge'
 
 export type RuntimeSnapshotMessageType = 'runtime_snapshot' | 'runtime_update'
 

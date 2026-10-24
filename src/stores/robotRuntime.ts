@@ -1,6 +1,10 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createRuntimeDataSource, createTaskCommandClient } from '../api'
+import {
+  BackendClient,
+  createRuntimeDataSource,
+  runtimeApiConfig,
+} from '../api'
 import { mockRuntimeDashboard } from '../mock/runtime'
 import {
   canvasPointToRosPoint,
@@ -19,15 +23,9 @@ import type {
   RuntimeTaskTimelineStatus,
   RuntimeTaskType,
 } from '../types'
-import type {
-  NavigateTaskCommand,
-  NavigateThroughPosesTaskCommand,
-  TaskCommandEvent,
-} from '../api'
-
-const MOCK_POSE_TICK_MS = 500
-const MOCK_LOOP_TICKS = 80
-const SCHEDULE_CHECK_MS = 1000
+import { createBackendSync } from './backendSync'
+import { createBackendTaskCommands } from './taskCommands'
+import { createMockRuntimeController } from './mock'
 
 const taskTypeNames: Record<RuntimeTaskType, string> = {
   single_point_navigation: '单点导航',
@@ -42,7 +40,12 @@ export interface CreateTaskInput {
   targetPointId?: string
   targetPointIds?: string[]
   dispatchMode?: 'immediate' | 'scheduled'
+  scheduleMode?: 'once' | 'interval' | 'daily'
   scheduledAt?: number
+  intervalMinutes?: number
+  timeOfDay?: string
+  routeTemplateId?: string
+  routeTemplateName?: string
 }
 
 function nowText() {
@@ -64,6 +67,20 @@ function formatDateTime(timestamp: number) {
 
 function localTimezone() {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+}
+
+function mockScheduleTimestamp(input: CreateTaskInput) {
+  if ((input.scheduleMode ?? 'once') === 'interval') {
+    return Date.now() + (input.intervalMinutes ?? 60) * 60_000
+  }
+  if (input.scheduleMode === 'daily' && input.timeOfDay) {
+    const [hours = 0, minutes = 0] = input.timeOfDay.split(':').map(Number)
+    const date = new Date()
+    date.setHours(hours, minutes, 0, 0)
+    if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1)
+    return date.getTime()
+  }
+  return input.scheduledAt ?? Date.now() + 5 * 60_000
 }
 
 function toRosMapTransform(map: RuntimeDashboardSnapshot['map']): RosMapTransform {
@@ -108,7 +125,7 @@ function emptyTaskState(): RuntimeTaskState {
 }
 
 function isTaskActive(status: RuntimeTaskStatus) {
-  return status === 'running' || status === 'paused'
+  return status === 'running' || status === 'paused' || status === 'unknown'
 }
 
 function mergeRosbridgeSnapshot(
@@ -128,7 +145,7 @@ function mergeRosbridgeSnapshot(
     },
     systemStatus: incoming.systemStatus,
     systemMessage: incoming.systemMessage,
-    alarms: incoming.alarms,
+    alarms: runtimeApiConfig.backendEnabled ? current.alarms : incoming.alarms,
     metrics: incoming.metrics,
     telemetry: incoming.telemetry,
     map: {
@@ -149,21 +166,49 @@ function mergeRosbridgeSnapshot(
 export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
   const runtime = ref<RuntimeDashboardSnapshot>(structuredClone(mockRuntimeDashboard))
   const dataSource = createRuntimeDataSource()
-  const taskCommandClient = createTaskCommandClient(dataSource.mode)
+  const backendClient = runtimeApiConfig.backendEnabled
+    ? new BackendClient()
+    : null
+  const backendEnabled = Boolean(backendClient) && dataSource.mode !== 'mock'
   const dataSourceMode = dataSource.mode
   const dataSourceError = ref<string | null>(null)
+  const backendError = ref<string | null>(null)
   let stopDataSourceSubscription: (() => void) | undefined
-  let stopTaskCommandSubscription: (() => void) | undefined
   let dataSourceInitialized = false
-  let mockPoseTimer: number | undefined
-  let mockPoseTick = 0
   let nextTaskNumber = 1
   let nextTargetNumber = 6
-  let scheduleTimer: number | undefined
-  const pauseRequestedTaskIds = new Set<string>()
 
   const mapDashboard = computed(() => toMapDashboardSnapshot(runtime.value))
   const overviewDashboard = computed(() => toOverviewDashboardSnapshot(runtime.value))
+
+  const backendSync =
+    backendClient &&
+    createBackendSync({
+      runtime,
+      backendClient,
+      backendError,
+      setTaskRuns,
+    })
+  const backendCommands =
+    backendClient &&
+    backendSync &&
+    createBackendTaskCommands({
+      runtime,
+      backendClient,
+      backendError,
+      refresh: backendSync.refresh,
+      upsertRun: backendSync.upsertRun,
+      updateTask: updateTaskRecord,
+      setTaskRuns,
+    })
+  const mockController = createMockRuntimeController({
+    runtime,
+    updateTask: updateTaskRecord,
+    setTaskRuns,
+    startTask,
+    appendLog,
+    nowText,
+  })
 
   async function initializeDataSource() {
     if (dataSourceInitialized) return
@@ -172,7 +217,7 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
 
     if (dataSource.mode === 'mock') {
       runtime.value = await dataSource.loadSnapshot()
-      startScheduleTimer()
+      mockController.startScheduleTimer()
       return
     }
 
@@ -184,8 +229,17 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
         error instanceof Error ? error.message : '真实数据初始加载失败'
     }
 
-    startTaskCommandEvents()
-    startScheduleTimer()
+    if (backendEnabled) {
+      try {
+        await backendSync?.refresh()
+        backendSync?.start()
+      } catch (error) {
+        backendError.value =
+          error instanceof Error ? error.message : '业务后端连接失败'
+      }
+    } else {
+      backendError.value = '真实环境必须启用业务后端'
+    }
 
     stopDataSourceSubscription = dataSource.subscribe(
       (snapshot) => {
@@ -203,12 +257,10 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
 
   function stopDataSource() {
     stopDataSourceSubscription?.()
-    stopTaskCommandSubscription?.()
-    stopScheduleTimer()
+    backendSync?.stop()
+    mockController.stopScheduleTimer()
     stopDataSourceSubscription = undefined
-    stopTaskCommandSubscription = undefined
     dataSource.disconnect()
-    taskCommandClient.disconnect()
     dataSourceInitialized = false
   }
 
@@ -216,7 +268,10 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     runtime.value = snapshot
   }
 
-  function setRuntimeWithTasks(records: RuntimeTaskRecord[], currentTaskId = runtime.value.task.id) {
+  function setTaskRuns(
+    records: RuntimeTaskRecord[],
+    currentTaskId = runtime.value.task.id,
+  ) {
     const currentRecord =
       records.find((record) => record.id === currentTaskId) ??
       records.find((record) => isTaskActive(record.status)) ??
@@ -224,97 +279,14 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
 
     runtime.value = {
       ...runtime.value,
-      tasks: records,
+      taskRuns: records,
       task: currentRecord ? taskStateFromRecord(currentRecord) : emptyTaskState(),
     }
   }
 
-  function updateTaskSchedule(
-    taskId: string,
-    updater: (task: RuntimeTaskRecord) => RuntimeTaskRecord,
-  ) {
-    updateTaskRecord(taskId, updater)
-  }
-
-  function hasActiveTask(exceptTaskId?: string) {
-    return runtime.value.tasks.some(
-      (task) => task.id !== exceptTaskId && isTaskActive(task.status),
-    )
-  }
-
-  function isScheduledTask(task: RuntimeTaskRecord) {
-    return task.dispatchMode === 'scheduled' && Boolean(task.schedule)
-  }
-
-  function triggerScheduledTask(task: RuntimeTaskRecord) {
-    const schedule = task.schedule
-    if (!schedule) return
-
-    if (task.status !== 'idle') {
-      return
-    }
-
-    if (hasActiveTask(task.id)) {
-      if (schedule.status !== 'waiting') {
-        updateTaskSchedule(task.id, (item) => ({
-          ...item,
-          schedule: item.schedule
-            ? { ...item.schedule, status: 'waiting' }
-            : item.schedule,
-          feedback: '计划时间已到，正在等待当前任务完成。',
-        }))
-        appendLog('info', `定时任务 ${task.id} 到点，等待当前任务完成`)
-      }
-      return
-    }
-
-    const triggeredAt = Date.now()
-    updateTaskSchedule(task.id, (item) => ({
-      ...item,
-      schedule: item.schedule
-        ? { ...item.schedule, status: 'triggering', triggeredAt }
-        : item.schedule,
-      timeline: [
-        ...item.timeline,
-        { status: 'triggered' as const, timestamp: nowText(), note: 'Scheduled trigger' },
-      ],
-    }))
-    appendLog('info', `定时任务 ${task.id} 已到执行时间，开始下发`)
-    startTask(task.id)
-    updateTaskSchedule(task.id, (item) => ({
-      ...item,
-      schedule: item.schedule
-        ? { ...item.schedule, status: 'dispatched', triggeredAt }
-        : item.schedule,
-    }))
-  }
-
-  function checkScheduledTasks() {
-    const now = Date.now()
-
-    for (const task of runtime.value.tasks) {
-      if (!isScheduledTask(task) || !task.schedule) continue
-      if (task.schedule.status !== 'pending' && task.schedule.status !== 'waiting') continue
-      if (task.schedule.scheduledAt > now) continue
-
-      triggerScheduledTask(task)
-    }
-  }
-
-  function startScheduleTimer() {
-    if (scheduleTimer) return
-
-    scheduleTimer = window.setInterval(checkScheduledTasks, SCHEDULE_CHECK_MS)
-  }
-
-  function stopScheduleTimer() {
-    if (!scheduleTimer) return
-
-    window.clearInterval(scheduleTimer)
-    scheduleTimer = undefined
-  }
-
   function appendLog(level: RuntimeDashboardSnapshot['logs'][number]['level'], message: string) {
+    if (backendEnabled) return
+
     runtime.value = {
       ...runtime.value,
       logs: [
@@ -391,7 +363,7 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     const target = runtime.value.map.targets.find((item) => item.id === targetId)
     if (!target) return false
 
-    const referencedByActiveTask = runtime.value.tasks.some(
+    const referencedByActiveTask = runtime.value.taskRuns.some(
       (task) =>
         (task.targetPointId === targetId || task.targetPointIds?.includes(targetId)) &&
         !terminalTaskStatuses.includes(task.status),
@@ -446,78 +418,20 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
         activeTargetId: targets.at(-1)?.id,
       },
     }
-    mockPoseTick = Math.round(
-      (runtime.value.task.progressPercent / 100) * (MOCK_LOOP_TICKS - 1),
-    )
-  }
-
-  function pointDistance(start: RuntimePathPoint, end: RuntimePathPoint) {
-    return Math.hypot(end.x - start.x, end.y - start.y)
-  }
-
-  function poseAtPathProgress(points: RuntimePathPoint[], progress: number): RuntimeRobotPose {
-    if (points.length < 2) {
-      return {
-        ...runtime.value.map.robotPose,
-        stamp: Date.now(),
-      }
-    }
-
-    const segments = points.slice(0, -1).map((start, index) => {
-      const end = points[index + 1]
-
-      return {
-        start,
-        end,
-        length: end ? pointDistance(start, end) : 0,
-      }
-    })
-    const totalLength = segments.reduce((sum, segment) => sum + segment.length, 0)
-    let distance = totalLength * progress
-
-    for (const segment of segments) {
-      if (!segment.end) continue
-
-      if (distance <= segment.length || segment === segments.at(-1)) {
-        const ratio = segment.length ? distance / segment.length : 0
-        const x = segment.start.x + (segment.end.x - segment.start.x) * ratio
-        const y = segment.start.y + (segment.end.y - segment.start.y) * ratio
-        const yawRad = Math.atan2(segment.end.y - segment.start.y, segment.end.x - segment.start.x)
-
-        return {
-          x,
-          y,
-          yawRad,
-          frameId: runtime.value.map.ros.frameId,
-          stamp: Date.now(),
-        }
-      }
-
-      distance -= segment.length
-    }
-
-    const lastPoint = points.at(-1) ?? runtime.value.map.robotPose
-
-    return {
-      x: lastPoint.x,
-      y: lastPoint.y,
-      yawRad: runtime.value.map.robotPose.yawRad,
-      frameId: runtime.value.map.ros.frameId,
-      stamp: Date.now(),
-    }
+    mockController.resetPoseProgress(runtime.value.task.progressPercent)
   }
 
   function updateTaskRecord(
     taskId: string,
     updater: (task: RuntimeTaskRecord) => RuntimeTaskRecord,
   ) {
-    const target = runtime.value.tasks.find((task) => task.id === taskId)
+    const target = runtime.value.taskRuns.find((task) => task.id === taskId)
     if (!target) return false
 
-    const records = runtime.value.tasks.map((task) =>
+    const records = runtime.value.taskRuns.map((task) =>
       task.id === taskId ? updater(task) : task,
     )
-    setRuntimeWithTasks(records)
+    setTaskRuns(records)
     return true
   }
 
@@ -546,321 +460,12 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     }, 260)
   }
 
-  function startTaskCommandEvents() {
-    if (stopTaskCommandSubscription) return
-
-    stopTaskCommandSubscription = taskCommandClient.subscribeTaskEvents(handleTaskCommandEvent)
-  }
-
-  function routeLength(points: RuntimePathPoint[]) {
-    return points
-      .slice(0, -1)
-      .reduce((sum, point, index) => {
-        const next = points[index + 1]
-
-        return next ? sum + pointDistance(point, next) : sum
-      }, 0)
-  }
-
-  function progressFromRemainingDistance(distanceRemaining?: number) {
-    if (distanceRemaining === undefined) return undefined
-
-    const length = routeLength(runtime.value.map.routePoints)
-
-    if (!length) return undefined
-
-    return Math.min(Math.max(Math.round((1 - distanceRemaining / length) * 100), 0), 100)
-  }
-
-  function feedbackFromCommandEvent(event: Extract<TaskCommandEvent, { type: 'feedback' }>) {
-    const parts = ['正在执行导航任务']
-
-    if (event.distanceRemaining !== undefined) {
-      parts.push(`剩余 ${event.distanceRemaining.toFixed(1)} m`)
-    }
-
-    if (event.estimatedTimeRemainingSec !== undefined) {
-      parts.push(`预计 ${Math.max(1, Math.ceil(event.estimatedTimeRemainingSec / 60))} min`)
-    }
-
-    if (event.numberOfRecoveries !== undefined && event.numberOfRecoveries > 0) {
-      parts.push(`恢复 ${event.numberOfRecoveries} 次`)
-    }
-
-    if (event.posesRemaining !== undefined) {
-      parts.push(`剩余 ${event.posesRemaining} 个航点`)
-    }
-
-    return `${parts.join('，')}。`
-  }
-
-  function updateTaskFromCommandFeedback(
-    event: Extract<TaskCommandEvent, { type: 'feedback' }>,
-  ) {
-    const progressPercent = progressFromRemainingDistance(event.distanceRemaining)
-
-    updateTaskRecord(event.taskId, (task) => {
-      const allTargetIds = task.targetPointIds ?? []
-      const goalStartIndex = task.activeGoalStartIndex ?? 0
-      const sentTargetCount = Math.max(allTargetIds.length - goalStartIndex, 0)
-      const completedInCurrentGoal =
-        event.posesRemaining === undefined
-          ? 0
-          : Math.min(
-              Math.max(sentTargetCount - Math.round(event.posesRemaining), 0),
-              sentTargetCount,
-            )
-      const nextTargetIndex =
-        event.posesRemaining === undefined
-          ? task.nextTargetIndex
-          : Math.min(goalStartIndex + completedInCurrentGoal, allTargetIds.length)
-
-      return {
-        ...task,
-        status: 'running',
-        transitioning: false,
-        feedback: feedbackFromCommandEvent(event),
-        nextTargetIndex,
-        progressPercent: progressPercent ?? task.progressPercent,
-        etaMinutes:
-          event.estimatedTimeRemainingSec === undefined
-            ? task.etaMinutes
-            : Math.max(0, Math.ceil(event.estimatedTimeRemainingSec / 60)),
-      }
-    })
-  }
-
-  function updateTaskFromCommandStatus(
-    event: Extract<TaskCommandEvent, { type: 'status' | 'result' }>,
-  ) {
-    const previous = runtime.value.tasks.find((task) => task.id === event.taskId)
-
-    if (!previous) return
-
-    const status =
-      event.status === 'canceled' && pauseRequestedTaskIds.has(event.taskId)
-        ? 'paused'
-        : event.status
-    const timestamp = nowText()
-    const isTerminal = terminalTaskStatuses.includes(status)
-    const feedback =
-      status === 'paused'
-        ? '任务已暂停，当前导航 goal 已停止。'
-        : event.errorMessage
-          ? `${event.feedback}：${event.errorMessage}`
-          : event.feedback
-
-    updateTaskRecord(event.taskId, (task) => ({
-      ...task,
-      status,
-      transitioning: false,
-      completedTime: isTerminal ? timestamp : task.completedTime,
-      progressPercent: status === 'completed' ? 100 : task.progressPercent,
-      nextTargetIndex:
-        status === 'completed' && task.targetPointIds
-          ? task.targetPointIds.length
-          : task.nextTargetIndex,
-      etaMinutes: isTerminal ? 0 : task.etaMinutes,
-      feedback,
-      failureReason: status === 'failed' ? event.errorMessage ?? event.feedback : task.failureReason,
-      timeline:
-        task.status === status
-          ? task.timeline
-          : [...task.timeline, { status, timestamp, note: event.goalId }],
-    }))
-
-    if (previous.status !== status && (isTerminal || status === 'paused')) {
-      appendLog(
-        status === 'failed' ? 'error' : status === 'canceled' ? 'warn' : 'info',
-        `任务 ${event.taskId} 回填状态：${status}`,
-      )
-    }
-  }
-
-  function handleTaskCommandEvent(event: TaskCommandEvent) {
-    if (event.type === 'feedback') {
-      updateTaskFromCommandFeedback(event)
-      return
-    }
-
-    updateTaskFromCommandStatus(event)
-  }
-
-  function isRosbridgeMode() {
-    return dataSource.mode === 'rosbridge'
-  }
-
   function taskTargetIds(task: RuntimeTaskRecord) {
     if (task.targetPointIds?.length) return task.targetPointIds
     return task.targetPointId ? [task.targetPointId] : []
   }
 
-  function taskTargets(task: RuntimeTaskRecord) {
-    return taskTargetIds(task).flatMap((targetId) => {
-      const target = runtime.value.map.targets.find((item) => item.id === targetId)
-
-      return target ? [target] : []
-    })
-  }
-
-  function remainingTaskTargets(task: RuntimeTaskRecord) {
-    const targetIds = taskTargetIds(task)
-    const startIndex =
-      task.type === 'multi_point_cruise'
-        ? Math.min(Math.max(task.nextTargetIndex ?? 0, 0), targetIds.length)
-        : 0
-
-    return targetIds.slice(startIndex).flatMap((targetId) => {
-      const target = runtime.value.map.targets.find((item) => item.id === targetId)
-
-      return target ? [target] : []
-    })
-  }
-
-  function toNavigateCommand(
-    task: RuntimeTaskRecord,
-    target: RuntimeMapPoint,
-  ): NavigateTaskCommand {
-    return {
-      taskId: task.id,
-      taskType: task.type,
-      targetName: target.name,
-      targetPose: {
-        x: target.x,
-        y: target.y,
-        yawRad: runtime.value.map.robotPose.yawRad,
-        frameId: runtime.value.map.ros.frameId,
-      },
-    }
-  }
-
-  function toNavigateThroughPosesCommand(
-    task: RuntimeTaskRecord,
-    targets: RuntimeMapPoint[],
-  ): NavigateThroughPosesTaskCommand {
-    return {
-      taskId: task.id,
-      taskType: task.type,
-      targetNames: targets.map((target) => target.name),
-      targetPoses: targets.map((target, index) => {
-        const nextTarget = targets[index + 1]
-        const previousTarget = targets[index - 1]
-        const directionStart = nextTarget ? target : (previousTarget ?? target)
-        const directionEnd = nextTarget ?? target
-        const yawRad =
-          directionStart === directionEnd
-            ? runtime.value.map.robotPose.yawRad
-            : Math.atan2(
-                directionEnd.y - directionStart.y,
-                directionEnd.x - directionStart.x,
-              )
-
-        return {
-          x: target.x,
-          y: target.y,
-          yawRad,
-          frameId: runtime.value.map.ros.frameId,
-        }
-      }),
-    }
-  }
-
-  function markTaskCommandFailed(taskId: string, error: unknown, action: string) {
-    const message = error instanceof Error ? error.message : `${action}失败`
-    const timestamp = nowText()
-
-    updateTaskRecord(taskId, (task) => ({
-      ...task,
-      status: 'failed',
-      transitioning: false,
-      completedTime: timestamp,
-      feedback: `${action}失败：${message}`,
-      failureReason: message,
-      timeline: [...task.timeline, { status: 'failed', timestamp, note: action }],
-    }))
-    appendLog('error', `任务 ${taskId} ${action}失败：${message}`)
-  }
-
-  function sendTaskCommand(task: RuntimeTaskRecord, action = '导航任务下发') {
-    const targets = taskTargets(task)
-
-    if (!targets.length) {
-      appendLog('warn', `任务 ${task.id} 缺少目标点，无法${action}`)
-      return
-    }
-
-    if (task.type === 'multi_point_cruise') {
-      updateTaskRecord(task.id, (item) => ({
-        ...item,
-        activeGoalStartIndex: 0,
-      }))
-    }
-
-    const command =
-      task.type === 'multi_point_cruise'
-        ? taskCommandClient.sendNavigateThroughPoses(
-            toNavigateThroughPosesCommand(task, targets),
-          )
-        : taskCommandClient.sendNavigateToPose(
-            toNavigateCommand(task, targets[0] as RuntimeMapPoint),
-          )
-
-    void command
-      .then((result) => {
-        appendLog('info', `任务 ${task.id} ${action}成功${result.goalId ? `，goal=${result.goalId}` : ''}`)
-      })
-      .catch((error: unknown) => {
-        markTaskCommandFailed(task.id, error, action)
-      })
-  }
-
-  function pauseRosTask(taskId: string) {
-    pauseRequestedTaskIds.add(taskId)
-    updateTaskRecord(taskId, (task) => ({
-      ...task,
-      transitioning: true,
-      feedback: '暂停命令已发送，等待 Nav2 停止当前 goal。',
-    }))
-
-    void taskCommandClient
-      .pauseTask({ taskId })
-      .then(() => {
-        appendLog('info', `任务 ${taskId} 的暂停已由 Nav2 确认`)
-      })
-      .catch((error: unknown) => {
-        const latestTask = runtime.value.tasks.find((task) => task.id === taskId)
-        if (latestTask && terminalTaskStatuses.includes(latestTask.status)) {
-          appendLog('warn', `任务 ${taskId} 在暂停确认前已进入 ${latestTask.status}`)
-          return
-        }
-        markTaskCommandFailed(taskId, error, '暂停任务')
-      })
-  }
-
-  function cancelRosTask(taskId: string) {
-    pauseRequestedTaskIds.delete(taskId)
-    updateTaskRecord(taskId, (task) => ({
-      ...task,
-      transitioning: true,
-      feedback: '取消命令已发送，等待 Nav2 取消当前 goal。',
-    }))
-
-    void taskCommandClient
-      .cancelTask({ taskId })
-      .then(() => {
-        appendLog('info', `任务 ${taskId} 的取消已由 Nav2 确认`)
-      })
-      .catch((error: unknown) => {
-        const latestTask = runtime.value.tasks.find((task) => task.id === taskId)
-        if (latestTask && terminalTaskStatuses.includes(latestTask.status)) {
-          appendLog('warn', `任务 ${taskId} 在取消确认前已进入 ${latestTask.status}`)
-          return
-        }
-        markTaskCommandFailed(taskId, error, '取消任务')
-      })
-  }
-
-  function createTask(input: CreateTaskInput) {
+  async function createTask(input: CreateTaskInput) {
     const requestedTargetIds =
       input.type === 'multi_point_cruise'
         ? [...new Set(input.targetPointIds ?? [])]
@@ -868,21 +473,52 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
           ? [input.targetPointId]
           : []
 
-    if (input.type === 'multi_point_cruise' && requestedTargetIds.length < 2) {
+    const usesTemplate =
+      input.dispatchMode === 'scheduled' && Boolean(input.routeTemplateId)
+
+    if (
+      !usesTemplate &&
+      input.type === 'multi_point_cruise' &&
+      requestedTargetIds.length < 2
+    ) {
       appendLog('warn', '多点巡航至少需要选择两个已保存目标点')
       return null
     }
 
-    if (input.type !== 'return_home' && !requestedTargetIds.length) {
+    if (
+      !usesTemplate &&
+      input.type !== 'return_home' &&
+      !requestedTargetIds.length
+    ) {
       appendLog('warn', '请先选择并保存目标点，再下发任务')
       return null
     }
 
     const isScheduled = input.dispatchMode === 'scheduled'
-
-    if (isScheduled && (!input.scheduledAt || input.scheduledAt <= Date.now())) {
-      appendLog('warn', '定时任务的执行时间必须晚于当前时间')
-      return null
+    if (isScheduled) {
+      const mode = input.scheduleMode ?? 'once'
+      if (
+        mode === 'once' &&
+        (!input.scheduledAt || input.scheduledAt <= Date.now())
+      ) {
+        appendLog('warn', '指定日期任务的执行时间必须晚于当前时间')
+        return null
+      }
+      if (
+        mode === 'daily' &&
+        !/^([01]\d|2[0-3]):[0-5]\d$/.test(input.timeOfDay ?? '')
+      ) {
+        appendLog('warn', '每日计划需要有效的 HH:MM 时间')
+        return null
+      }
+      if (
+        mode === 'interval' &&
+        (!Number.isInteger(input.intervalMinutes) ||
+          Number(input.intervalMinutes) <= 0)
+      ) {
+        appendLog('warn', '间隔计划需要大于 0 的整数分钟数')
+        return null
+      }
     }
 
     const timestamp = nowText()
@@ -895,6 +531,7 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     })
 
     if (
+      !usesTemplate &&
       input.type !== 'return_home' &&
       targets.length !== requestedTargetIds.length
     ) {
@@ -902,7 +539,20 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       return null
     }
 
+    if (backendEnabled && backendCommands) {
+      try {
+        return await backendCommands.createTask(input, targets)
+      } catch (error) {
+        backendError.value =
+          error instanceof Error ? error.message : '后端创建任务失败'
+        return null
+      }
+    }
+
     const target = targets[0]
+    const localScheduledAt = isScheduled
+      ? mockScheduleTimestamp(input)
+      : undefined
     const currentIsBusy = isTaskActive(runtime.value.task.status)
     const status: RuntimeTaskStatus = isScheduled || currentIsBusy ? 'idle' : 'running'
     const task: RuntimeTaskRecord = {
@@ -917,11 +567,13 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       dispatchMode: isScheduled ? 'scheduled' : 'immediate',
       schedule: isScheduled
         ? {
-            mode: 'once',
-            scheduledAt: input.scheduledAt as number,
+            mode: input.scheduleMode ?? 'once',
+            scheduledAt: localScheduledAt as number,
             timezone: localTimezone(),
             status: 'pending',
             createdAt: Date.now(),
+            intervalMinutes: input.intervalMinutes,
+            timeOfDay: input.timeOfDay,
           }
         : undefined,
       targetPointId:
@@ -937,7 +589,7 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       progressPercent: 0,
       etaMinutes: input.type === 'return_home' ? 6 : 8,
       feedback: isScheduled
-        ? `定时任务已创建，将于 ${formatDateTime(input.scheduledAt as number)} 执行。`
+        ? `定时任务已创建，将于 ${formatDateTime(localScheduledAt as number)} 执行。`
         : status === 'running'
           ? '任务已下发，正在前往目标点。'
           : '任务已创建，等待执行。',
@@ -948,7 +600,7 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
               {
                 status: 'scheduled' as const,
                 timestamp,
-                note: formatDateTime(input.scheduledAt as number),
+                note: formatDateTime(localScheduledAt as number),
               },
             ]
           : []),
@@ -956,8 +608,8 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       ],
     }
 
-    const nextTasks = [task, ...runtime.value.tasks]
-    setRuntimeWithTasks(nextTasks, status === 'running' ? id : runtime.value.task.id)
+    const nextTasks = [task, ...runtime.value.taskRuns]
+    setTaskRuns(nextTasks, status === 'running' ? id : runtime.value.task.id)
 
     if (requestedTargetIds.length) {
       setActiveTarget(requestedTargetIds.at(-1))
@@ -969,24 +621,23 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     appendLog(
       'info',
       isScheduled
-        ? `定时任务 ${id} 已创建：${task.targetName}，计划 ${formatDateTime(input.scheduledAt as number)}`
+        ? `定时任务 ${id} 已创建：${task.targetName}，计划 ${formatDateTime(localScheduledAt as number)}`
         : `任务 ${id} 已下发：${task.targetName}`,
     )
-
-    if (isRosbridgeMode() && status === 'running') {
-      sendTaskCommand(task)
-    }
 
     return id
   }
 
   function startTask(taskId: string) {
-    const task = runtime.value.tasks.find((item) => item.id === taskId)
+    const task = runtime.value.taskRuns.find((item) => item.id === taskId)
     if (!task) return
 
-    pauseRequestedTaskIds.delete(taskId)
-    const currentTask = runtime.value.tasks.find((item) => item.id === runtime.value.task.id)
-    let records = runtime.value.tasks
+    if (backendEnabled) return
+
+    const currentTask = runtime.value.taskRuns.find(
+      (item) => item.id === runtime.value.task.id,
+    )
+    let records = runtime.value.taskRuns
 
     if (currentTask && currentTask.id !== taskId && currentTask.status === 'running') {
       const timestamp = nowText()
@@ -1023,14 +674,10 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
           }
         : item,
     )
-    setRuntimeWithTasks(records, taskId)
+    setTaskRuns(records, taskId)
 
     if (taskTargetIds(task).length) {
       setRouteToTargets(taskTargetIds(task))
-    }
-
-    if (isRosbridgeMode()) {
-      sendTaskCommand(task, '启动任务')
     }
 
     window.setTimeout(() => {
@@ -1039,8 +686,11 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
   }
 
   function pauseTask(taskId: string) {
-    if (isRosbridgeMode()) {
-      pauseRosTask(taskId)
+    const task = runtime.value.taskRuns.find((item) => item.id === taskId)
+    if (!task) return
+
+    if (backendEnabled && backendCommands) {
+      void backendCommands.pause(task)
       return
     }
 
@@ -1048,12 +698,16 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
   }
 
   function continueTask(taskId: string) {
-    const task = runtime.value.tasks.find((item) => item.id === taskId)
+    const task = runtime.value.taskRuns.find((item) => item.id === taskId)
     if (!task) return
 
-    pauseRequestedTaskIds.delete(taskId)
-    setRuntimeWithTasks(
-      runtime.value.tasks.map((item) =>
+    if (backendEnabled && backendCommands) {
+      void backendCommands.resume(task)
+      return
+    }
+
+    setTaskRuns(
+      runtime.value.taskRuns.map((item) =>
         item.id === taskId ? { ...item, status: 'running', transitioning: true } : item,
       ),
       taskId,
@@ -1065,46 +719,6 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
 
     if (remainingTargetIds.length) {
       setRouteToTargets(remainingTargetIds)
-    }
-
-    if (isRosbridgeMode()) {
-      const targets =
-        task.type === 'multi_point_cruise'
-          ? remainingTaskTargets(task)
-          : taskTargets(task)
-
-      if (!targets.length) {
-        appendLog('warn', `任务 ${taskId} 已无剩余目标点，无法继续`)
-        return
-      }
-
-      if (task.type === 'multi_point_cruise') {
-        updateTaskRecord(taskId, (item) => ({
-          ...item,
-          activeGoalStartIndex: item.nextTargetIndex ?? 0,
-        }))
-      }
-
-      const command =
-        task.type === 'multi_point_cruise'
-          ? targets.length === 1
-            ? taskCommandClient.sendNavigateToPose(
-                toNavigateCommand(task, targets[0] as RuntimeMapPoint),
-              )
-            : taskCommandClient.sendNavigateThroughPoses(
-                toNavigateThroughPosesCommand(task, targets),
-              )
-          : taskCommandClient.resumeTask(
-              toNavigateCommand(task, targets[0] as RuntimeMapPoint),
-            )
-
-      void command
-        .then((result) => {
-          appendLog('info', `任务 ${taskId} 继续成功${result.goalId ? `，goal=${result.goalId}` : ''}`)
-        })
-        .catch((error: unknown) => {
-          markTaskCommandFailed(taskId, error, '继续任务')
-        })
     }
 
     window.setTimeout(() => {
@@ -1119,7 +733,12 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
   }
 
   function cancelTask(taskId: string) {
-    const task = runtime.value.tasks.find((item) => item.id === taskId)
+    const task = runtime.value.taskRuns.find((item) => item.id === taskId)
+
+    if (backendEnabled && backendCommands && task) {
+      void backendCommands.cancel(task)
+      return
+    }
 
     if (task?.schedule && task.status === 'idle') {
       updateTaskRecord(taskId, (item) => ({
@@ -1136,21 +755,20 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
       return
     }
 
-    if (isRosbridgeMode()) {
-      cancelRosTask(taskId)
-      return
-    }
-
     transitionTask(taskId, 'canceled', '任务已由操作员取消。')
   }
 
   function retryTask(taskId: string) {
-    const task = runtime.value.tasks.find((item) => item.id === taskId)
+    const task = runtime.value.taskRuns.find((item) => item.id === taskId)
     if (!task) return
 
-    pauseRequestedTaskIds.delete(taskId)
+    if (backendEnabled && backendCommands) {
+      void backendCommands.retry(task)
+      return
+    }
+
     const timestamp = nowText()
-    const records = runtime.value.tasks.map((item) =>
+    const records = runtime.value.taskRuns.map((item) =>
       item.id === taskId
         ? {
             ...item,
@@ -1167,22 +785,9 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
           }
         : item,
     )
-    setRuntimeWithTasks(records, taskId)
+    setTaskRuns(records, taskId)
     if (taskTargetIds(task).length) {
       setRouteToTargets(taskTargetIds(task))
-    }
-
-    if (isRosbridgeMode()) {
-      sendTaskCommand(
-        {
-          ...task,
-          status: 'running',
-          nextTargetIndex: task.type === 'multi_point_cruise' ? 0 : undefined,
-          activeGoalStartIndex:
-            task.type === 'multi_point_cruise' ? 0 : undefined,
-        },
-        '重试任务',
-      )
     }
 
     window.setTimeout(() => {
@@ -1190,18 +795,22 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     }, 260)
   }
 
-  function deleteTask(taskId: string) {
-    const task = runtime.value.tasks.find((item) => item.id === taskId)
+  async function deleteTask(taskId: string) {
+    const task = runtime.value.taskRuns.find((item) => item.id === taskId)
     if (!task) return false
 
-    const records = runtime.value.tasks.filter((item) => item.id !== taskId)
+    if (backendEnabled && backendCommands) {
+      return backendCommands.deleteTask(task)
+    }
+
+    const records = runtime.value.taskRuns.filter((item) => item.id !== taskId)
     const deletedCurrentTask = runtime.value.task.id === taskId
     const nextCurrentTask =
       records.find((item) => isTaskActive(item.status)) ?? records[0]
 
     runtime.value = {
       ...runtime.value,
-      tasks: records,
+      taskRuns: records,
       task: deletedCurrentTask
         ? nextCurrentTask
           ? taskStateFromRecord(nextCurrentTask)
@@ -1213,88 +822,55 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     return true
   }
 
+  async function loadTaskDetail(taskId: string) {
+    await backendSync?.loadTaskDetail(taskId)
+  }
+
+  function runScheduleNow(scheduleId: string) {
+    void backendCommands?.runScheduleNow(scheduleId)
+  }
+
+  function cancelSchedule(scheduleId: string) {
+    void backendCommands?.cancelSchedule(scheduleId)
+  }
+
+  async function createRouteTemplate(name: string, targetIds: string[]) {
+    if (!backendCommands) return null
+
+    const targets = targetIds.flatMap((targetId) => {
+      const target = runtime.value.map.targets.find(
+        (item) => item.id === targetId,
+      )
+      return target ? [target] : []
+    })
+    if (!targets.length) return null
+
+    try {
+      return await backendCommands.createRouteTemplate(name, targets)
+    } catch (error) {
+      backendError.value =
+        error instanceof Error ? error.message : '保存路线模板失败'
+      return null
+    }
+  }
+
   function reorderTasks(fromIndex: number, toIndex: number) {
     if (fromIndex === toIndex) return
 
-    const records = [...runtime.value.tasks]
+    const records = [...runtime.value.taskRuns]
     const [removed] = records.splice(fromIndex, 1)
     if (!removed) return
 
     records.splice(toIndex, 0, removed)
-    setRuntimeWithTasks(records)
-  }
-
-  function updateMockProgress(progress: number, pose: RuntimeRobotPose) {
-    const currentTask = runtime.value.tasks.find((task) => task.id === runtime.value.task.id)
-    if (!currentTask || currentTask.status !== 'running') return
-
-    const progressPercent = Math.round(progress * 100)
-    const reachedEnd = progress >= 1
-    const timestamp = reachedEnd ? nowText() : undefined
-    const records = runtime.value.tasks.map((task) =>
-      task.id === currentTask.id
-        ? {
-            ...task,
-            progressPercent,
-            status: reachedEnd ? ('completed' as const) : task.status,
-            completedTime: timestamp ?? task.completedTime,
-            feedback: reachedEnd
-              ? '任务已完成，机器人已到达目标点。'
-              : `正在执行任务，路径进度 ${progressPercent}%。`,
-            timeline: reachedEnd
-              ? [...task.timeline, { status: 'completed' as const, timestamp: timestamp ?? nowText() }]
-              : task.timeline,
-          }
-        : task,
-    )
-
-    setRuntimeWithTasks(records, currentTask.id)
-    runtime.value = {
-      ...runtime.value,
-      map: {
-        ...runtime.value.map,
-        robotPose: pose,
-      },
-    }
-
-    if (reachedEnd) {
-      appendLog('info', `任务 ${currentTask.id} 已完成`)
-    }
-  }
-
-  function startMockPoseStream() {
-    if (mockPoseTimer) return
-
-    const currentTask = runtime.value.tasks.find((task) => task.id === runtime.value.task.id)
-    if (currentTask) {
-      mockPoseTick = Math.round(
-        (currentTask.progressPercent / 100) * (MOCK_LOOP_TICKS - 1),
-      )
-    }
-
-    mockPoseTimer = window.setInterval(() => {
-      const currentTask = runtime.value.tasks.find((task) => task.id === runtime.value.task.id)
-      if (!currentTask || currentTask.status !== 'running') return
-
-      mockPoseTick = Math.min(mockPoseTick + 1, MOCK_LOOP_TICKS - 1)
-      const progress = mockPoseTick / (MOCK_LOOP_TICKS - 1)
-      const pose = poseAtPathProgress(runtime.value.map.routePoints, progress)
-
-      updateMockProgress(progress, pose)
-    }, MOCK_POSE_TICK_MS)
-  }
-
-  function stopMockPoseStream() {
-    if (!mockPoseTimer) return
-
-    window.clearInterval(mockPoseTimer)
-    mockPoseTimer = undefined
+    setTaskRuns(records)
   }
 
   return {
     runtime,
     dataSourceMode,
     dataSourceError,
+    backendEnabled,
+    backendError,
     mapDashboard,
     overviewDashboard,
     initializeDataSource,
@@ -1312,8 +888,12 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     cancelTask,
     retryTask,
     deleteTask,
+    loadTaskDetail,
+    runScheduleNow,
+    cancelSchedule,
+    createRouteTemplate,
     reorderTasks,
-    startMockPoseStream,
-    stopMockPoseStream,
+    startMockPoseStream: mockController.startPoseStream,
+    stopMockPoseStream: mockController.stopPoseStream,
   }
 })

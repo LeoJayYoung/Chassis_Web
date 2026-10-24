@@ -1,6 +1,13 @@
 export type OverviewHealthStatus = 'normal' | 'warning' | 'error'
 
-export type OverviewTaskStatus = 'running' | 'queued' | 'paused' | 'completed' | 'failed' | 'canceled'
+export type OverviewTaskStatus =
+  | 'running'
+  | 'queued'
+  | 'paused'
+  | 'unknown'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
 
 export type OverviewLogLevel = 'info' | 'warn' | 'error'
 

@@ -22,6 +22,7 @@ const taskStatusLabels: Record<OverviewTaskStatus, string> = {
   running: '执行中',
   queued: '排队中',
   paused: '已暂停',
+  unknown: '待核对',
   completed: '已完成',
   failed: '失败',
   canceled: '已取消',
@@ -707,6 +708,10 @@ onBeforeUnmount(() => {
   background: var(--color-warning);
 }
 
+.task-row.is-unknown::before {
+  background: var(--color-warning);
+}
+
 .task-row.is-failed::before,
 .task-row.is-canceled::before {
   background: var(--color-error);
@@ -760,6 +765,12 @@ onBeforeUnmount(() => {
   background: var(--color-warning-bg);
 }
 
+.task-status.is-unknown {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-strong);
+}
+
 .task-status.is-failed,
 .task-status.is-canceled {
   color: var(--color-error);
@@ -791,6 +802,10 @@ onBeforeUnmount(() => {
 }
 
 .progress-bar span.is-paused {
+  background: var(--color-warning);
+}
+
+.progress-bar span.is-unknown {
   background: var(--color-warning);
 }
 

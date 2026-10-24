@@ -4,7 +4,14 @@ export type NavigationMode = 'auto_navigation' | 'manual_control'
 
 export type TaskType = 'single_point_navigation' | 'multi_point_cruise' | 'return_home'
 
-export type TaskStatus = 'idle' | 'running' | 'paused' | 'canceled' | 'completed' | 'failed'
+export type TaskStatus =
+  | 'idle'
+  | 'running'
+  | 'paused'
+  | 'unknown'
+  | 'canceled'
+  | 'completed'
+  | 'failed'
 
 export type LocalizationStatus = 'ready' | 'initializing' | 'lost'
 

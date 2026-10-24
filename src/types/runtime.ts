@@ -4,9 +4,20 @@ export type RuntimeNavigationMode = 'auto_navigation' | 'manual_control'
 
 export type RuntimeTaskType = 'single_point_navigation' | 'multi_point_cruise' | 'return_home'
 
-export type RuntimeTaskStatus = 'idle' | 'running' | 'paused' | 'canceled' | 'completed' | 'failed'
+export type RuntimeTaskStatus =
+  | 'idle'
+  | 'running'
+  | 'paused'
+  | 'unknown'
+  | 'canceled'
+  | 'completed'
+  | 'failed'
 
-export type RuntimeTaskDispatchMode = 'immediate' | 'scheduled'
+export type RuntimeTaskDispatchMode =
+  | 'immediate'
+  | 'scheduled'
+  | 'manual_schedule'
+  | 'retry'
 
 export type RuntimeTaskScheduleStatus =
   | 'pending'
@@ -222,17 +233,20 @@ export interface RuntimeTaskTimelineEvent {
 }
 
 export interface RuntimeTaskSchedule {
-  mode: 'once'
+  mode: 'once' | 'interval' | 'daily'
   scheduledAt: number
   timezone: string
   status: RuntimeTaskScheduleStatus
   createdAt: number
+  intervalMinutes?: number
+  timeOfDay?: string
   triggeredAt?: number
   failureReason?: string
 }
 
 export interface RuntimeTaskRecord {
   id: string
+  backendRunId?: string
   name: string
   targetName?: string
   type: RuntimeTaskType
@@ -251,6 +265,29 @@ export interface RuntimeTaskRecord {
   failureReason?: string
   transitioning?: boolean
   timeline: RuntimeTaskTimelineEvent[]
+}
+
+export interface RuntimeScheduleRecord {
+  id: string
+  name: string
+  routeId: string
+  routeName: string
+  mode: 'once' | 'interval' | 'daily'
+  enabled: boolean
+  scheduledAt?: number
+  nextRunAt?: number
+  intervalMinutes?: number
+  timeOfDay?: string
+  createdAt: number
+  targetNames: string[]
+}
+
+export interface RuntimeRouteTemplate {
+  id: string
+  name: string
+  mapId?: string
+  targets: RuntimeMapPoint[]
+  createdAt: number
 }
 
 export interface RuntimeTaskQueueItem {
@@ -293,7 +330,9 @@ export interface RuntimeDashboardSnapshot {
   systemMessage: string
   map: RuntimeMapSnapshot
   task: RuntimeTaskState
-  tasks: RuntimeTaskRecord[]
+  taskRuns: RuntimeTaskRecord[]
+  schedules: RuntimeScheduleRecord[]
+  routeTemplates: RuntimeRouteTemplate[]
   alarms: RuntimeAlarmSummary
   metrics: RuntimeMetricItem[]
   logs: RuntimeLogEntry[]

@@ -229,7 +229,7 @@ export function toOverviewDashboardSnapshot(
       alarms: runtime.alarms,
     },
     map: toOverviewMapSnapshot(runtime),
-    taskQueue: runtime.tasks.map((task) => ({
+    taskQueue: runtime.taskRuns.map((task) => ({
       id: task.id,
       name: task.name,
       target: task.targetName ?? '待选择',

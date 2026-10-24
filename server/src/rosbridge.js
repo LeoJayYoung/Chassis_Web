@@ -194,7 +194,12 @@ export class RosbridgeClient extends EventEmitter {
         level: 'info',
         module: 'stm32',
         source: topic,
-        message: typeof msg === 'string' ? msg : JSON.stringify(msg),
+        message:
+          typeof msg === 'string'
+            ? msg
+            : typeof msg?.data === 'string'
+              ? msg.data
+              : JSON.stringify(msg),
       })
     }
   }

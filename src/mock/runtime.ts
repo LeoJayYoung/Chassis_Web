@@ -136,7 +136,7 @@ export const mockRuntimeDashboard: RuntimeDashboardSnapshot = {
     progressPercent: 67,
     etaMinutes: 4,
   },
-  tasks: [
+  taskRuns: [
     {
       id: 'TASK-0041',
       name: '充电',
@@ -235,6 +235,8 @@ export const mockRuntimeDashboard: RuntimeDashboardSnapshot = {
       timeline: [{ status: 'created', timestamp: '2026-09-09 10:40:00' }],
     },
   ],
+  schedules: [],
+  routeTemplates: [],
   alarms: {
     total: 0,
     critical: 0,

@@ -143,7 +143,9 @@ function createRosbridgeSnapshot(): RuntimeDashboardSnapshot {
       obstacles: [],
       zones: [],
     },
-    tasks: [],
+    taskRuns: [],
+    schedules: [],
+    routeTemplates: [],
     alarms: {
       total: 0,
       critical: 0,

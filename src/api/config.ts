@@ -7,7 +7,7 @@ function trimTrailingSlashes(value: string) {
 const configuredMode = import.meta.env.VITE_DATA_SOURCE?.trim().toLowerCase()
 
 function resolveMode(value?: string): RuntimeDataSourceMode {
-  return value === 'real' || value === 'rosbridge' ? value : 'mock'
+  return value === 'rosbridge' ? value : 'mock'
 }
 
 function envValue(value: string | undefined, fallback: string) {
@@ -22,10 +22,12 @@ function envNumber(value: string | undefined, fallback: number) {
 
 export const runtimeApiConfig = {
   mode: resolveMode(configuredMode),
-  apiBaseUrl: trimTrailingSlashes(
-    import.meta.env.VITE_RUNTIME_API_BASE_URL?.trim() || '/api',
+  backendEnabled:
+    import.meta.env.VITE_BACKEND_ENABLED?.trim().toLowerCase() === 'true',
+  backendApiBaseUrl: trimTrailingSlashes(
+    import.meta.env.VITE_BACKEND_API_BASE_URL?.trim() ||
+      'http://127.0.0.1:8080/api',
   ),
-  wsUrl: import.meta.env.VITE_RUNTIME_WS_URL?.trim() || '',
   rosbridgeWsUrl: import.meta.env.VITE_ROSBRIDGE_WS_URL?.trim() || '',
   rosTopics: {
     map: envValue(import.meta.env.VITE_ROS_TOPIC_MAP, '/map'),
@@ -41,17 +43,6 @@ export const runtimeApiConfig = {
     tfStatic: envValue(import.meta.env.VITE_ROS_TOPIC_TF_STATIC, '/tf_static'),
     batteryState: envValue(import.meta.env.VITE_ROS_TOPIC_BATTERY_STATE, '/battery_state'),
     diagnostics: envValue(import.meta.env.VITE_ROS_TOPIC_DIAGNOSTICS, '/diagnostics'),
-  },
-  rosCommands: {
-    navigateActionName: envValue(
-      import.meta.env.VITE_ROS_NAVIGATE_ACTION_NAME,
-      '/navigate_to_pose',
-    ),
-    navigateThroughPosesActionName: envValue(
-      import.meta.env.VITE_ROS_NAVIGATE_THROUGH_POSES_ACTION_NAME,
-      '/navigate_through_poses',
-    ),
-    timeoutMs: envNumber(import.meta.env.VITE_ROS_COMMAND_TIMEOUT_MS, 6000),
   },
   localizationLostTimeoutMs: envNumber(
     import.meta.env.VITE_ROS_LOCALIZATION_LOST_TIMEOUT_MS,

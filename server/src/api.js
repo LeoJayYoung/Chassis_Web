@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type',
-  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
 }
 
 function sendJson(res, status, data) {
@@ -56,7 +56,15 @@ export function createApiServer({ store, bus, rosbridge, scheduler, taskService 
 
   bus.on('log', (entry) => broadcast('log', entry))
   bus.on('task-run', (run) => broadcast('task-run', run))
-
+  bus.on('schedule-created', (schedule) =>
+    broadcast('schedule-created', schedule),
+  )
+  bus.on('schedule-updated', (schedule) =>
+    broadcast('schedule-updated', schedule),
+  )
+  bus.on('schedule-deleted', (schedule) =>
+    broadcast('schedule-deleted', schedule),
+  )
   function handleSse(req, res) {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -143,6 +151,24 @@ export function createApiServer({ store, bus, rosbridge, scheduler, taskService 
       }
     }
 
+    if (path.startsWith('/api/schedules/') && method === 'POST') {
+      const segments = path.slice('/api/schedules/'.length).split('/')
+      const scheduleId = segments[0]
+      const action = segments[1]
+
+      try {
+        if (action === 'cancel') {
+          return sendJson(res, 200, scheduler.cancelSchedule(scheduleId))
+        }
+        if (action === 'run-now') {
+          const run = scheduler.runNow(scheduleId)
+          return sendJson(res, 201, store.getTaskRun(run.id))
+        }
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message })
+      }
+    }
+
     // ---------- 任务执行记录 ----------
     if (path === '/api/task-runs' && method === 'GET') {
       return sendJson(
@@ -160,6 +186,18 @@ export function createApiServer({ store, bus, rosbridge, scheduler, taskService 
       const run = store.getTaskRun(id)
       if (!run) return sendJson(res, 404, { error: 'not found' })
       return sendJson(res, 200, run)
+    }
+
+    if (path.startsWith('/api/task-runs/') && method === 'DELETE') {
+      const id = path.slice('/api/task-runs/'.length)
+      try {
+        const deleted = store.deleteTaskRun(id)
+        return deleted
+          ? sendJson(res, 200, { deleted: true })
+          : sendJson(res, 404, { error: 'not found' })
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message })
+      }
     }
 
     // ---------- 手动下发任务 ----------
@@ -195,6 +233,10 @@ export function createApiServer({ store, bus, rosbridge, scheduler, taskService 
         if (action === 'pause') return sendJson(res, 200, taskService.pauseRun(runId))
         if (action === 'resume') return sendJson(res, 200, taskService.resumeRun(runId))
         if (action === 'cancel') return sendJson(res, 200, taskService.cancelRun(runId))
+        if (action === 'retry') {
+          const run = taskService.retryRun(runId)
+          return sendJson(res, 201, store.getTaskRun(run.id))
+        }
       } catch (error) {
         return sendJson(res, 400, { error: error.message })
       }

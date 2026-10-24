@@ -216,6 +216,24 @@ export function createStore(DatabaseSync, dbPath) {
     return db.prepare('SELECT COUNT(*) AS n FROM logs').get().n
   }
 
+  function nextTaskNo() {
+    const row = db
+      .prepare(
+        `SELECT MAX(
+           CASE
+             WHEN task_no GLOB 'TASK-[0-9]*'
+             THEN CAST(SUBSTR(task_no, 6) AS INTEGER)
+             ELSE 0
+           END
+         ) AS max_no
+         FROM task_runs`,
+      )
+      .get()
+    const next = (Number(row?.max_no) || 0) + 1
+
+    return `TASK-${String(next).padStart(4, '0')}`
+  }
+
   function saveRoute(route) {
     db.prepare(
       'INSERT OR REPLACE INTO routes (id, name, map_id, targets, created_at) VALUES (?, ?, ?, ?, ?)',
@@ -373,6 +391,19 @@ export function createStore(DatabaseSync, dbPath) {
     return { ...run, targets: JSON.parse(run.targets), events }
   }
 
+  function deleteTaskRun(id) {
+    return transaction(() => {
+      const run = db.prepare('SELECT status FROM task_runs WHERE id = ?').get(id)
+      if (!run) return false
+      if (!['completed', 'failed', 'canceled'].includes(run.status)) {
+        throw new Error('只能删除已经结束的任务')
+      }
+
+      db.prepare('DELETE FROM task_run_events WHERE run_id = ?').run(id)
+      return db.prepare('DELETE FROM task_runs WHERE id = ?').run(id).changes === 1
+    })
+  }
+
   function findTaskRunByScheduleOccurrence(scheduleId, scheduledFor) {
     if (!scheduleId || !scheduledFor) return null
 
@@ -506,6 +537,7 @@ export function createStore(DatabaseSync, dbPath) {
     insertLog,
     queryLogs,
     countLogs,
+    nextTaskNo,
     saveRoute,
     listRoutes,
     getRoute,
@@ -518,6 +550,7 @@ export function createStore(DatabaseSync, dbPath) {
     appendTaskRunEvent,
     listTaskRuns,
     getTaskRun,
+    deleteTaskRun,
     findTaskRunByScheduleOccurrence,
     findActiveTaskRun,
     listInterruptedTaskRuns,
