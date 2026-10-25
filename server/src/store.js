@@ -216,6 +216,33 @@ export function createStore(DatabaseSync, dbPath) {
     return db.prepare('SELECT COUNT(*) AS n FROM logs').get().n
   }
 
+  function pruneLogs({ retentionDays, maxRows } = {}) {
+    return transaction(() => {
+      let removedByAge = 0
+      let removedByCount = 0
+
+      if (retentionDays > 0) {
+        const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000
+        const result = db.prepare('DELETE FROM logs WHERE ts < ?').run(cutoff)
+        removedByAge = Number(result.changes) || 0
+      }
+
+      if (maxRows > 0) {
+        const result = db
+          .prepare(
+            `DELETE FROM logs
+             WHERE id NOT IN (
+               SELECT id FROM logs ORDER BY ts DESC, id DESC LIMIT ?
+             )`,
+          )
+          .run(maxRows)
+        removedByCount = Number(result.changes) || 0
+      }
+
+      return { removedByAge, removedByCount }
+    })
+  }
+
   function nextTaskNo() {
     const row = db
       .prepare(
@@ -256,6 +283,23 @@ export function createStore(DatabaseSync, dbPath) {
   function getRoute(id) {
     const row = db.prepare('SELECT * FROM routes WHERE id = ?').get(id)
     return row ? { ...row, targets: JSON.parse(row.targets) } : null
+  }
+
+  function renameRoute(id, name) {
+    const nextName = String(name ?? '').trim()
+    if (!nextName) throw new Error('路线名称不能为空')
+
+    const result = db.prepare('UPDATE routes SET name = ? WHERE id = ?').run(nextName, id)
+    return result.changes === 1
+  }
+
+  function deleteRoute(id) {
+    const used = db.prepare('SELECT COUNT(*) AS n FROM schedules WHERE route_id = ?').get(id)
+    if (used && used.n > 0) {
+      throw new Error(`该路线正被 ${used.n} 个巡检计划引用，请先删除那些计划`)
+    }
+
+    return db.prepare('DELETE FROM routes WHERE id = ?').run(id).changes === 1
   }
 
   function saveSchedule(schedule) {
@@ -299,6 +343,17 @@ export function createStore(DatabaseSync, dbPath) {
     db.prepare(`UPDATE schedules SET ${fields.join(', ')} WHERE id = ?`).run(
       ...params,
     )
+  }
+
+  function deleteSchedule(id) {
+    return transaction(() => {
+      const schedule = db.prepare('SELECT id FROM schedules WHERE id = ?').get(id)
+      if (!schedule) return false
+
+      // 清掉这个计划的触发台账；task_runs 保留，作为执行历史
+      db.prepare('DELETE FROM schedule_runs WHERE schedule_id = ?').run(id)
+      return db.prepare('DELETE FROM schedules WHERE id = ?').run(id).changes === 1
+    })
   }
 
   function createTaskRun(run) {
@@ -537,14 +592,18 @@ export function createStore(DatabaseSync, dbPath) {
     insertLog,
     queryLogs,
     countLogs,
+    pruneLogs,
     nextTaskNo,
     saveRoute,
     listRoutes,
     getRoute,
+    renameRoute,
+    deleteRoute,
     saveSchedule,
     listSchedules,
     listEnabledSchedules,
     updateSchedule,
+    deleteSchedule,
     createTaskRun,
     updateTaskRun,
     appendTaskRunEvent,

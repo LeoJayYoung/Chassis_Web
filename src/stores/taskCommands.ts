@@ -76,6 +76,74 @@ export function createBackendTaskCommands(options: TaskCommandOptions) {
     return route.id
   }
 
+  async function renameRoute(routeId: string, name: string) {
+    try {
+      await backendClient.renameRoute(routeId, name)
+      await refresh()
+    } catch (error) {
+      backendError.value =
+        error instanceof Error ? error.message : '修改路线名称失败'
+    }
+  }
+
+  async function deleteRoute(routeId: string): Promise<string | null> {
+    try {
+      await backendClient.deleteRoute(routeId)
+      await refresh()
+      return null
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : '删除路线失败'
+      backendError.value = message
+      return message
+    }
+  }
+
+  async function reuseRouteImmediately(routeId: string) {
+    try {
+      const run = await backendClient.dispatchTask({
+        routeId,
+        mapId: runtime.value.map.id,
+      })
+      upsertRun(await backendClient.getTaskRun(run.id))
+    } catch (error) {
+      backendError.value =
+        error instanceof Error ? error.message : '立即执行路线失败'
+    }
+  }
+
+  async function createScheduleFromRoute(
+    routeId: string,
+    input: {
+      mode: 'once' | 'interval' | 'daily'
+      scheduledAt?: number
+      intervalMinutes?: number
+      timeOfDay?: string
+    },
+  ): Promise<string | null> {
+    const route = runtime.value.routeTemplates.find(
+      (item) => item.id === routeId,
+    )
+
+    try {
+      await backendClient.createSchedule({
+        name: `${route?.name ?? '巡检路线'}计划`,
+        routeId,
+        mode: input.mode,
+        scheduledAt: input.scheduledAt,
+        intervalMinutes: input.intervalMinutes,
+        timeOfDay: input.timeOfDay,
+      })
+      await refresh()
+      return null
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : '创建巡检计划失败'
+      backendError.value = message
+      return message
+    }
+  }
+
   async function createTask(input: BackendTaskInput, targets: RuntimeMapPoint[]) {
     if (!targets.length && !input.routeTemplateId) {
       throw new Error('任务至少需要一个目标点或路线模板')
@@ -180,6 +248,26 @@ export function createBackendTaskCommands(options: TaskCommandOptions) {
     }
   }
 
+  async function enableSchedule(scheduleId: string) {
+    try {
+      await backendClient.enableSchedule(scheduleId)
+      await refresh()
+    } catch (error) {
+      backendError.value =
+        error instanceof Error ? error.message : '重新启用巡检计划失败'
+    }
+  }
+
+  async function deleteSchedule(scheduleId: string) {
+    try {
+      await backendClient.deleteSchedule(scheduleId)
+      await refresh()
+    } catch (error) {
+      backendError.value =
+        error instanceof Error ? error.message : '删除巡检计划失败'
+    }
+  }
+
   async function deleteTask(task: RuntimeTaskRecord) {
     if (!task.backendRunId) return false
 
@@ -192,6 +280,10 @@ export function createBackendTaskCommands(options: TaskCommandOptions) {
 
   return {
     createRouteTemplate,
+    renameRoute,
+    deleteRoute,
+    reuseRouteImmediately,
+    createScheduleFromRoute,
     createTask,
     runScheduleNow,
     pause: (task: RuntimeTaskRecord) => command(task, 'pause'),
@@ -199,6 +291,8 @@ export function createBackendTaskCommands(options: TaskCommandOptions) {
     cancel: (task: RuntimeTaskRecord) => command(task, 'cancel'),
     retry,
     cancelSchedule,
+    enableSchedule,
+    deleteSchedule,
     deleteTask,
   }
 }

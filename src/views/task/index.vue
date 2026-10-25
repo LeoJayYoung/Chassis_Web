@@ -2,8 +2,11 @@
 import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
+import MapSnapshot from '../../components/overview/OverviewMapSnapshot.vue'
 import { useRobotRuntimeStore } from '../../stores/robotRuntime'
+import { routeToOverviewMapSnapshot } from '../../utils/dashboardAdapters'
 import type {
+  RuntimeRouteTemplate,
   RuntimeTaskRecord,
   RuntimeTaskStatus,
   RuntimeTaskTimelineStatus,
@@ -154,8 +157,8 @@ function formatTimestamp(timestamp: number) {
 
   return {
     date: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
-    time: `${pad(date.getHours())}:${pad(date.getMinutes())}`,
-    full: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`,
+    time: `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+    full: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
   }
 }
 
@@ -191,9 +194,27 @@ function scheduleRuleText(schedule: (typeof schedules.value)[number]) {
 }
 
 function scheduleNextRun(schedule: (typeof schedules.value)[number]) {
-  return schedule.nextRunAt
-    ? formatTimestamp(schedule.nextRunAt).full
-    : '等待计算'
+  // 一次性计划的执行时间已在"执行规则"里体现，这里不再重复；
+  // 只有启用中的间隔/每日计划才有有意义的"下次执行"。
+  if (schedule.mode === 'once') return '—'
+  if (schedule.status !== 'enabled' || !schedule.nextRunAt) return '—'
+  return formatTimestamp(schedule.nextRunAt).full
+}
+
+const scheduleLifecycleLabels: Record<
+  'enabled' | 'canceled' | 'completed' | 'expired',
+  string
+> = {
+  enabled: '启用中',
+  completed: '已完成',
+  canceled: '已取消',
+  expired: '已过期',
+}
+
+function scheduleStatusLabel(
+  status: 'enabled' | 'canceled' | 'completed' | 'expired',
+) {
+  return scheduleLifecycleLabels[status]
 }
 
 function runScheduleNow(scheduleId: string) {
@@ -202,6 +223,151 @@ function runScheduleNow(scheduleId: string) {
 
 function cancelSchedule(scheduleId: string) {
   runtimeStore.cancelSchedule(scheduleId)
+}
+
+function enableSchedule(scheduleId: string) {
+  runtimeStore.enableSchedule(scheduleId)
+}
+
+function deleteSchedule(scheduleId: string) {
+  runtimeStore.deleteSchedule(scheduleId)
+}
+
+const editingRouteId = ref('')
+const editingRouteName = ref('')
+const expandedRouteId = ref('')
+const routePreviewCache = new Map<
+  string,
+  ReturnType<typeof routeToOverviewMapSnapshot>
+>()
+let routePreviewCacheKey = ''
+
+function toggleRouteExpand(routeId: string) {
+  expandedRouteId.value = expandedRouteId.value === routeId ? '' : routeId
+}
+
+function routePreview(route: RuntimeRouteTemplate) {
+  const gridStamp = String(runtime.value.map.occupancyGrid?.stamp ?? 'no-grid')
+
+  if (gridStamp !== routePreviewCacheKey) {
+    routePreviewCacheKey = gridStamp
+    routePreviewCache.clear()
+  }
+
+  const cached = routePreviewCache.get(route.id)
+  if (cached) return cached
+
+  const snapshot = routeToOverviewMapSnapshot(route.targets, runtime.value)
+  routePreviewCache.set(route.id, snapshot)
+  return snapshot
+}
+
+function startRenameRoute(route: RuntimeRouteTemplate) {
+  editingRouteId.value = route.id
+  editingRouteName.value = route.name
+}
+
+function cancelRenameRoute() {
+  editingRouteId.value = ''
+  editingRouteName.value = ''
+}
+
+function confirmRenameRoute(route: RuntimeRouteTemplate) {
+  const name = editingRouteName.value.trim()
+  if (!name) return
+
+  runtimeStore.renameRoute(route.id, name)
+  cancelRenameRoute()
+}
+
+async function handleDeleteRoute(route: RuntimeRouteTemplate) {
+  if (!window.confirm(`确认删除路线模板「${route.name}」？`)) return
+
+  const error = await runtimeStore.deleteRoute(route.id)
+  if (error) {
+    window.alert(`删除失败：${error}`)
+  }
+}
+
+function runRouteImmediately(route: RuntimeRouteTemplate) {
+  runtimeStore.reuseRouteImmediately(route.id)
+}
+
+const reuseRoute = ref<RuntimeRouteTemplate | null>(null)
+const reuseMode = ref<'once' | 'interval' | 'daily'>('once')
+const reuseScheduledAt = ref('')
+const reuseInterval = ref(60)
+const reuseTimeOfDay = ref('09:00')
+const reuseError = ref('')
+
+const reuseModeOptions: Array<{ value: 'once' | 'interval' | 'daily'; label: string }> = [
+  { value: 'once', label: '一次性' },
+  { value: 'interval', label: '间隔' },
+  { value: 'daily', label: '每日' },
+]
+
+function toDatetimeLocalValue(timestamp: number) {
+  const date = new Date(timestamp)
+  const pad = (value: number) => String(value).padStart(2, '0')
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+const reuseMinDateTime = computed(() => toDatetimeLocalValue(Date.now() + 60_000))
+
+function openReuseRoute(route: RuntimeRouteTemplate) {
+  reuseRoute.value = route
+  reuseMode.value = 'once'
+  reuseScheduledAt.value = toDatetimeLocalValue(Date.now() + 5 * 60_000)
+  reuseInterval.value = 60
+  reuseTimeOfDay.value = '09:00'
+  reuseError.value = ''
+}
+
+function closeReuseRoute() {
+  reuseRoute.value = null
+  reuseError.value = ''
+}
+
+async function confirmReuseRoute() {
+  const route = reuseRoute.value
+  if (!route) return
+
+  const input: {
+    mode: 'once' | 'interval' | 'daily'
+    scheduledAt?: number
+    intervalMinutes?: number
+    timeOfDay?: string
+  } = { mode: reuseMode.value }
+
+  if (reuseMode.value === 'once') {
+    const timestamp = new Date(reuseScheduledAt.value).getTime()
+    if (!Number.isFinite(timestamp) || timestamp <= Date.now()) {
+      reuseError.value = '请选择晚于当前时间的执行时间'
+      return
+    }
+    input.scheduledAt = timestamp
+  } else if (reuseMode.value === 'interval') {
+    if (!Number.isInteger(reuseInterval.value) || reuseInterval.value <= 0) {
+      reuseError.value = '间隔分钟数必须是大于 0 的整数'
+      return
+    }
+    input.intervalMinutes = reuseInterval.value
+  } else {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(reuseTimeOfDay.value)) {
+      reuseError.value = '时间格式应为 HH:MM'
+      return
+    }
+    input.timeOfDay = reuseTimeOfDay.value
+  }
+
+  const error = await runtimeStore.createScheduleFromRoute(route.id, input)
+  if (error) {
+    reuseError.value = error
+    return
+  }
+
+  closeReuseRoute()
 }
 
 function selectTask(task: RuntimeTaskRecord) {
@@ -611,6 +777,9 @@ function dragEnd() {
           <span class="management-row__eyebrow">SCHEDULE</span>
           <strong>{{ schedule.name }}</strong>
           <small>{{ schedule.routeName }}</small>
+          <span class="schedule-status" :class="`is-${schedule.status}`">
+            {{ scheduleStatusLabel(schedule.status) }}
+          </span>
         </div>
         <div class="management-row__metric">
           <span>执行规则</span>
@@ -625,20 +794,47 @@ function dragEnd() {
           <strong>{{ schedule.targetNames.join(' → ') || '未配置' }}</strong>
         </div>
         <div class="management-row__actions">
-          <button
-            class="action-button is-success"
-            type="button"
-            @click="runScheduleNow(schedule.id)"
-          >
-            立即执行
-          </button>
-          <button
-            class="action-button is-danger"
-            type="button"
-            @click="cancelSchedule(schedule.id)"
-          >
-            取消计划
-          </button>
+          <template v-if="schedule.status === 'enabled'">
+            <button
+              class="action-button is-success"
+              type="button"
+              @click="runScheduleNow(schedule.id)"
+            >
+              立即执行
+            </button>
+            <button
+              class="action-button is-danger"
+              type="button"
+              @click="cancelSchedule(schedule.id)"
+            >
+              取消计划
+            </button>
+          </template>
+          <template v-else-if="schedule.status === 'completed' || schedule.status === 'expired'">
+            <button
+              class="action-button is-danger"
+              type="button"
+              @click="deleteSchedule(schedule.id)"
+            >
+              删除
+            </button>
+          </template>
+          <template v-else>
+            <button
+              class="action-button is-success"
+              type="button"
+              @click="enableSchedule(schedule.id)"
+            >
+              重新启用
+            </button>
+            <button
+              class="action-button is-danger"
+              type="button"
+              @click="deleteSchedule(schedule.id)"
+            >
+              删除计划
+            </button>
+          </template>
         </div>
       </article>
       <div v-if="!schedules.length" class="management-empty">
@@ -651,16 +847,65 @@ function dragEnd() {
         v-for="route in routeTemplates"
         :key="route.id"
         class="route-template-card"
+        :class="{ 'is-expanded': expandedRouteId === route.id }"
       >
-        <div>
+        <div
+          class="route-template-card__title"
+          title="双击标题可改名"
+          @dblclick="startRenameRoute(route)"
+        >
           <span>ROUTE TEMPLATE</span>
-          <strong>{{ route.name }}</strong>
+          <template v-if="editingRouteId === route.id">
+            <input
+              v-model="editingRouteName"
+              class="route-rename-input"
+              maxlength="40"
+              aria-label="路线名称"
+              @dblclick.stop
+              @keyup.enter="confirmRenameRoute(route)"
+              @keyup.esc="cancelRenameRoute"
+            />
+          </template>
+          <template v-else>
+            <strong>{{ route.name }}</strong>
+          </template>
         </div>
+
+        <div v-if="expandedRouteId === route.id" class="route-template-card__map">
+          <MapSnapshot :snapshot="routePreview(route)" focus-waypoints />
+        </div>
+
         <p>{{ route.targets.map((target) => target.name).join(' → ') }}</p>
+
         <footer>
           <span>{{ route.targets.length }} 个航点</span>
           <span>{{ formatTimestamp(route.createdAt).full }}</span>
         </footer>
+
+        <div class="route-template-card__actions">
+          <template v-if="editingRouteId === route.id">
+            <button class="action-button is-success" type="button" @click="confirmRenameRoute(route)">
+              保存
+            </button>
+            <button class="action-button is-ghost" type="button" @click="cancelRenameRoute">
+              取消
+            </button>
+          </template>
+          <template v-else>
+            <button class="action-button is-success" type="button" @click="runRouteImmediately(route)">
+              立即执行
+            </button>
+            <button class="action-button is-success" type="button" @click="openReuseRoute(route)">
+              建计划
+            </button>
+            <button class="action-button is-ghost" type="button" @click="toggleRouteExpand(route.id)">
+              {{ expandedRouteId === route.id ? '收起地图' : '展开地图' }}
+            </button>
+            <button class="action-button is-danger" type="button" @click="handleDeleteRoute(route)">
+              删除
+            </button>
+          </template>
+        </div>
       </article>
       <div v-if="!routeTemplates.length" class="management-empty">
         暂无路线模板，请在地图页选择目标点并保存模板。
@@ -680,6 +925,51 @@ function dragEnd() {
             </button>
             <button class="confirm-button confirm-button--danger" type="button" @click="confirmDeleteTask">
               确认删除
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <div v-if="reuseRoute" class="confirm-backdrop" role="presentation" @click="closeReuseRoute">
+        <section class="reuse-modal" role="dialog" aria-modal="true" aria-labelledby="reuse-route-title" @click.stop>
+          <h2 id="reuse-route-title">用此路线建计划</h2>
+          <p>{{ reuseRoute.name }}（{{ reuseRoute.targets.length }} 个航点）</p>
+
+          <div class="reuse-mode">
+            <button
+              v-for="option in reuseModeOptions"
+              :key="option.value"
+              type="button"
+              :class="{ 'is-active': reuseMode === option.value }"
+              @click="reuseMode = option.value"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+
+          <label v-if="reuseMode === 'once'" class="reuse-field">
+            <span>执行时间</span>
+            <input v-model="reuseScheduledAt" type="datetime-local" :min="reuseMinDateTime" />
+          </label>
+
+          <label v-if="reuseMode === 'interval'" class="reuse-field">
+            <span>间隔（分钟）</span>
+            <input v-model.number="reuseInterval" type="number" min="1" />
+          </label>
+
+          <label v-if="reuseMode === 'daily'" class="reuse-field">
+            <span>每天时间</span>
+            <input v-model="reuseTimeOfDay" type="time" />
+          </label>
+
+          <p v-if="reuseError" class="reuse-error">{{ reuseError }}</p>
+
+          <div class="confirm-actions">
+            <button class="confirm-button confirm-button--ghost" type="button" @click="closeReuseRoute">
+              取消
+            </button>
+            <button class="confirm-button confirm-button--primary" type="button" @click="confirmReuseRoute">
+              创建计划
             </button>
           </div>
         </section>
@@ -974,7 +1264,7 @@ function dragEnd() {
     44px
     minmax(132px, 0.9fr)
     minmax(200px, 1.25fr)
-    minmax(96px, 0.62fr)
+    minmax(128px, 0.72fr)
     minmax(126px, 0.78fr)
     minmax(138px, 0.82fr)
     148px
@@ -1096,6 +1386,7 @@ function dragEnd() {
   border-radius: 999px;
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .dispatch-badge {
@@ -1543,6 +1834,37 @@ function dragEnd() {
   gap: 8px;
 }
 
+.schedule-status {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.schedule-status.is-enabled {
+  background: var(--color-primary-bg);
+  color: var(--color-primary-strong);
+}
+
+.schedule-status.is-completed {
+  background: var(--color-primary-bg);
+  color: var(--color-primary-strong);
+}
+
+.schedule-status.is-canceled {
+  background: var(--color-neutral-bg);
+  color: var(--color-muted);
+}
+
+.schedule-status.is-expired {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-strong);
+}
+
 .route-template-grid {
   grid-row: 3 / -1;
   display: grid;
@@ -1564,20 +1886,52 @@ function dragEnd() {
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
 }
 
-.route-template-card > div {
+.route-template-card__title {
   display: grid;
   gap: 5px;
+  cursor: pointer;
 }
 
-.route-template-card > div span {
+.route-template-card__title:hover strong {
+  color: var(--color-primary-strong);
+}
+
+.route-template-card__title span {
   color: var(--color-subtle);
   font-size: 10px;
   font-weight: 800;
 }
 
-.route-template-card > div strong {
+.route-template-card__title strong {
   color: var(--color-text);
   font-size: 16px;
+}
+
+.route-template-card__map {
+  position: relative;
+  height: 220px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface-soft);
+}
+
+.route-template-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.route-rename-input {
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-card);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 14px;
 }
 
 .route-template-card p {
@@ -1765,6 +2119,90 @@ function dragEnd() {
 
 .confirm-button--danger:hover {
   background: var(--color-error-deep);
+}
+
+.confirm-button--primary {
+  border: 1px solid transparent;
+  background: var(--color-primary);
+  color: #ffffff;
+}
+
+.confirm-button--primary:hover {
+  background: var(--color-primary-strong);
+}
+
+.reuse-modal {
+  display: grid;
+  gap: 12px;
+  width: min(460px, 100%);
+  padding: 22px;
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  background: var(--color-card);
+  box-shadow:
+    0 24px 54px rgba(15, 23, 42, 0.18),
+    0 4px 12px rgba(15, 23, 42, 0.08);
+}
+
+.reuse-modal h2 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.reuse-modal p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+.reuse-mode {
+  display: flex;
+  gap: 8px;
+}
+
+.reuse-mode button {
+  flex: 1;
+  min-height: 34px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-card);
+  color: var(--color-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.reuse-mode button.is-active {
+  border-color: var(--color-primary-dark);
+  background: var(--color-primary-dark);
+  color: var(--color-card);
+}
+
+.reuse-field {
+  display: grid;
+  gap: 6px;
+  color: var(--color-muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.reuse-field input {
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  background: var(--color-card);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.reuse-error {
+  margin: 0;
+  color: var(--color-error-strong);
+  font-size: 13px;
 }
 
 @keyframes pulse {

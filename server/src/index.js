@@ -58,6 +58,37 @@ async function main() {
     console.error('[server] rosbridge 错误：', error.message)
   })
 
+  function startLogRetention() {
+    const prune = () => {
+      try {
+        const result = store.pruneLogs({
+          retentionDays: config.logRetentionDays,
+          maxRows: config.logMaxRows,
+        })
+        const removed = result.removedByAge + result.removedByCount
+        if (!removed) return
+
+        const entry = {
+          ts: Date.now(),
+          level: 'info',
+          module: 'system',
+          source: 'server',
+          message: `日志清理：删除 ${removed} 条旧日志（保留近 ${config.logRetentionDays} 天）`,
+        }
+        store.insertLog(entry)
+        bus.emit('log', entry)
+      } catch (error) {
+        console.error('[server] 日志清理失败：', error.message)
+      }
+    }
+
+    prune()
+    const timer = setInterval(prune, config.logCleanupIntervalMs)
+    return () => clearInterval(timer)
+  }
+
+  const stopLogRetention = startLogRetention()
+
   scheduler.start()
   rosbridge.connect()
 
@@ -70,6 +101,7 @@ async function main() {
 
   function shutdown() {
     console.log('[server] 正在关闭...')
+    stopLogRetention()
     scheduler.stop()
     rosbridge.disconnect()
     apiServer.close(() => {

@@ -20,6 +20,7 @@ interface TopicRow {
   value: string
   status: DiagnosticStatus
   badge?: string
+  muted?: boolean
 }
 
 interface NavMetric {
@@ -29,6 +30,8 @@ interface NavMetric {
 
 const runtimeStore = useRobotRuntimeStore()
 const { runtime } = storeToRefs(runtimeStore)
+
+const NOT_CONNECTED = '未接入'
 
 const statusLabels: Record<DiagnosticStatus, string> = {
   normal: '正常',
@@ -53,7 +56,7 @@ const localizationStatus = computed<DiagnosticStatus>(() => {
   return 'error'
 })
 
-const topicStatus = computed<DiagnosticStatus>(() => 'warning')
+const topicStatus = computed<DiagnosticStatus>(() => 'normal')
 
 const navigationStatus = computed<DiagnosticStatus>(() =>
   runtime.value.map.routePoints.length > 1 ? 'normal' : 'warning',
@@ -97,48 +100,56 @@ const systemHealthNote = computed(
     `${subsystemCounts.value.warning} 个警告，${subsystemCounts.value.error} 个异常`,
 )
 
-const communicationRows = computed<StatusRow[]>(() => [
-  {
-    label: 'WebSocket',
-    value: connectionLabels[runtime.value.connection],
-    status: communicationStatus.value,
-  },
-  {
-    label: '通信协议',
-    value: 'ROS 2 / DDS',
-    status: 'normal',
-  },
-  {
-    label: '数据延迟',
-    value: '31 ms',
-    status: 'normal',
-    mono: true,
-  },
-  {
-    label: '重连次数',
-    value: '0 次',
-    status: 'normal',
-    mono: true,
-  },
-  {
-    label: '消息速率',
-    value: '312 msg/s',
-    status: 'normal',
-    mono: true,
-  },
-])
+const communicationRows = computed<StatusRow[]>(() => {
+  const telemetry = runtime.value.telemetry?.communication
+  const linkDelay = telemetry?.linkDelayMs ?? null
+
+  return [
+    {
+      label: 'WebSocket',
+      value: connectionLabels[runtime.value.connection],
+      status: communicationStatus.value,
+    },
+    {
+      label: '通信协议',
+      value: 'ROS 2 / DDS',
+      status: 'normal',
+    },
+    {
+      label: '数据延迟',
+      value:
+        linkDelay == null ? NOT_CONNECTED : `${Math.round(linkDelay)} ms`,
+      status: 'normal',
+      mono: true,
+      muted: linkDelay == null,
+    },
+    {
+      label: '重连次数',
+      value: `${telemetry?.reconnectCount ?? 0} 次`,
+      status: 'normal',
+      mono: true,
+    },
+    {
+      label: '消息速率',
+      value: NOT_CONNECTED,
+      status: 'normal',
+      mono: true,
+      muted: true,
+    },
+  ]
+})
 
 const topicRows = computed<TopicRow[]>(() => [
-  { topic: '/scan', value: '10 Hz', status: 'normal' },
-  { topic: '/odom', value: '50 Hz', status: 'normal' },
-  { topic: '/map', value: '0.5 Hz', status: 'warning', badge: '偏低' },
-  { topic: '/plan', value: '2 Hz', status: 'normal' },
+  { topic: '/scan', value: NOT_CONNECTED, status: 'normal', muted: true },
+  { topic: '/odom', value: NOT_CONNECTED, status: 'normal', muted: true },
+  { topic: '/map', value: NOT_CONNECTED, status: 'normal', muted: true },
+  { topic: '/plan', value: NOT_CONNECTED, status: 'normal', muted: true },
 ])
 
 const localizationRows = computed<StatusRow[]>(() => [
   {
     label: '建图模式',
-    value: '未激活',
+    value: NOT_CONNECTED,
     status: localizationStatus.value,
     muted: true,
   },
@@ -155,9 +166,10 @@ const localizationRows = computed<StatusRow[]>(() => [
   },
   {
     label: '定位置信度',
-    value: runtime.value.localization === 'ready' ? '97.4%' : '--',
+    value: NOT_CONNECTED,
     status: localizationStatus.value,
     mono: true,
+    muted: true,
   },
   {
     label: '地图坐标系',
@@ -170,18 +182,21 @@ const localizationRows = computed<StatusRow[]>(() => [
 const navigationLeftRows = computed<StatusRow[]>(() => [
   {
     label: '导航系统 (Nav2)',
-    value: runtime.value.navigationMode === 'auto_navigation' ? '已激活' : '手动控制',
-    status: runtime.value.navigationMode === 'auto_navigation' ? 'normal' : 'warning',
+    value: NOT_CONNECTED,
+    status: 'normal',
+    muted: true,
   },
   {
     label: '整体路线规划',
-    value: 'NavFn',
+    value: NOT_CONNECTED,
     status: 'normal',
+    muted: true,
   },
   {
     label: '实时避障控制',
-    value: 'DWB',
+    value: NOT_CONNECTED,
     status: 'normal',
+    muted: true,
   },
 ])
 
@@ -206,7 +221,7 @@ const navigationRightRows = computed<StatusRow[]>(() => [
 ])
 
 const navigationMetrics = computed<NavMetric[]>(() => [
-  { label: '路径长度', value: '18.4 m' },
+  { label: '路径长度', value: NOT_CONNECTED },
   { label: '预计到达', value: `${runtime.value.task.etaMinutes || 0} min` },
   { label: '障碍物', value: `${runtime.value.map.obstacles.length}` },
 ])
@@ -214,38 +229,44 @@ const navigationMetrics = computed<NavMetric[]>(() => [
 const chassisLeftRows = computed<StatusRow[]>(() => [
   {
     label: '底盘控制板 (STM32)',
-    value: runtime.value.robot.status === 'online' ? '已连接' : '未连接',
-    status: chassisStatus.value,
+    value: NOT_CONNECTED,
+    status: 'normal',
+    muted: true,
   },
   {
     label: '急停状态',
-    value: '已释放',
+    value: NOT_CONNECTED,
     status: 'normal',
+    muted: true,
   },
   {
     label: '驱动电机',
-    value: '在线',
+    value: NOT_CONNECTED,
     status: 'normal',
+    muted: true,
   },
 ])
 
 const chassisRightRows = computed<StatusRow[]>(() => [
   {
     label: '激光雷达',
-    value: '运行中',
+    value: NOT_CONNECTED,
     status: 'normal',
+    muted: true,
   },
   {
     label: '温度',
-    value: '42 °C',
+    value: NOT_CONNECTED,
     status: 'normal',
     mono: true,
+    muted: true,
   },
   {
     label: '运行时长',
-    value: '06:14:33',
+    value: NOT_CONNECTED,
     status: 'normal',
     mono: true,
+    muted: true,
   },
 ])
 
@@ -318,32 +339,25 @@ function statusClass(status: DiagnosticStatus) {
 
       </section>
 
-      <section class="diagnostic-card is-warning">
+      <section class="diagnostic-card">
         <div class="card-head">
           <span class="card-icon">Hz</span>
           <h2>Topic 频率</h2>
-          <span class="status-badge is-warning">需关注</span>
+          <span class="status-badge is-muted">未接入</span>
         </div>
 
         <div class="topic-list">
           <div v-for="topic in topicRows" :key="topic.topic" class="topic-row">
             <span>
-              <i class="status-dot" :class="statusClass(topic.status)"></i>
+              <i class="status-dot" :class="topic.muted ? '' : statusClass(topic.status)"></i>
               {{ topic.topic }}
             </span>
-            <strong :class="statusClass(topic.status)">
+            <strong :class="topic.muted ? 'is-muted' : statusClass(topic.status)">
               {{ topic.value }}
               <b v-if="topic.badge">{{ topic.badge }}</b>
             </strong>
           </div>
         </div>
-
-        <p
-          class="warning-note"
-          title="/map 当前发布频率为 0.5 Hz，建议不低于 1 Hz，否则定位和地图更新可能变慢。"
-        >
-          提示：/map 频率偏低，可能影响建图。
-        </p>
       </section>
 
       <section class="diagnostic-card" :class="statusClass(localizationStatus)">
@@ -415,14 +429,11 @@ function statusClass(status: DiagnosticStatus) {
 
       <section
         class="diagnostic-card diagnostic-card--wide diagnostic-card--chassis"
-        :class="statusClass(chassisStatus)"
       >
         <div class="card-head">
           <span class="card-icon">底</span>
           <h2>底盘状态</h2>
-          <span class="status-badge" :class="statusClass(chassisStatus)">
-            {{ statusLabels[chassisStatus] }}
-          </span>
+          <span class="status-badge is-muted">未接入</span>
         </div>
 
         <div class="split-list">
@@ -756,6 +767,11 @@ function statusClass(status: DiagnosticStatus) {
   color: var(--color-error-strong);
 }
 
+.status-badge.is-muted {
+  background: var(--color-neutral-bg);
+  color: var(--color-muted);
+}
+
 .status-list,
 .topic-list {
   display: grid;
@@ -790,7 +806,8 @@ function statusClass(status: DiagnosticStatus) {
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
-.status-row strong.is-muted {
+.status-row strong.is-muted,
+.topic-row strong.is-muted {
   color: var(--color-muted);
 }
 

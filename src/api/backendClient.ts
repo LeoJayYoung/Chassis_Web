@@ -144,6 +144,20 @@ export class BackendClient {
     })
   }
 
+  renameRoute(id: string, name: string) {
+    return request<BackendRoute>(`/routes/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    })
+  }
+
+  deleteRoute(id: string) {
+    return request<{ deleted: boolean }>(
+      `/routes/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    )
+  }
+
   listSchedules() {
     return request<BackendSchedule[]>('/schedules')
   }
@@ -166,6 +180,20 @@ export class BackendClient {
     return request<{ id: string; enabled: number }>(
       `/schedules/${encodeURIComponent(id)}/cancel`,
       { method: 'POST' },
+    )
+  }
+
+  enableSchedule(id: string) {
+    return request<{ id: string; enabled: number; nextRunAt: number | null }>(
+      `/schedules/${encodeURIComponent(id)}/enable`,
+      { method: 'POST' },
+    )
+  }
+
+  deleteSchedule(id: string) {
+    return request<{ id: string; deleted: boolean }>(
+      `/schedules/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
     )
   }
 

@@ -102,7 +102,10 @@ function eventStatus(event: string): RuntimeTaskTimelineStatus {
   return 'running'
 }
 
-export function backendRunToRuntime(run: BackendTaskRun): RuntimeTaskRecord {
+export function backendRunToRuntime(
+  run: BackendTaskRun,
+  scheduleCreatedAt?: Map<string, number>,
+): RuntimeTaskRecord {
   const status = taskStatus(run)
   const targetIds = run.targets.map((target) => target.id)
   const progressPercent =
@@ -119,6 +122,10 @@ export function backendRunToRuntime(run: BackendTaskRun): RuntimeTaskRecord {
         : run.dispatched_by === 'retry'
           ? 'retry'
           : 'immediate'
+  // 「创建时间」：计划触发的任务用计划本身被创建的时刻；手动任务用实际下发时刻。
+  const scheduleCreated = run.schedule_id
+    ? scheduleCreatedAt?.get(run.schedule_id)
+    : undefined
 
   return {
     id: run.task_no || run.id,
@@ -135,7 +142,18 @@ export function backendRunToRuntime(run: BackendTaskRun): RuntimeTaskRecord {
     targetPointIds: targetIds,
     nextTargetIndex: run.next_target_index,
     activeGoalStartIndex: run.active_goal_start_index,
-    createdTime: formatTimestamp(run.started_at) ?? '',
+    // 计划时间：后端 task_runs.scheduled_for 是计划触发的时刻，
+    // 不映射的话前端「计划时间」列永远是空的。
+    schedule: run.scheduled_for
+      ? {
+          mode: 'once',
+          scheduledAt: run.scheduled_for,
+          timezone: localTimezone(),
+          status: 'dispatched',
+          createdAt: run.started_at,
+        }
+      : undefined,
+    createdTime: formatTimestamp(scheduleCreated ?? run.started_at) ?? '',
     completedTime: formatTimestamp(run.completed_at),
     progressPercent,
     etaMinutes:
@@ -178,8 +196,31 @@ function routeToRuntime(route: BackendRoute): RuntimeRouteTemplate {
 
 function scheduleToRuntime(
   schedule: BackendSchedule,
-  route?: BackendRoute,
+  route: BackendRoute | undefined,
+  firedScheduleKeys: Set<string>,
 ): RuntimeScheduleRecord {
+  // 一次性计划到点触发后后端会置 enabled=0；用执行记录区分"已完成"和"被取消"。
+  // 已取消且时间已过的一次性计划，重新启用会被后端拒绝，单独标为"已过期"。
+  let status: RuntimeScheduleRecord['status'] = 'enabled'
+
+  if (!schedule.enabled) {
+    if (
+      schedule.mode === 'once' &&
+      schedule.scheduled_at &&
+      firedScheduleKeys.has(`${schedule.id}:${schedule.scheduled_at}`)
+    ) {
+      status = 'completed'
+    } else if (
+      schedule.mode === 'once' &&
+      schedule.scheduled_at &&
+      schedule.scheduled_at <= Date.now()
+    ) {
+      status = 'expired'
+    } else {
+      status = 'canceled'
+    }
+  }
+
   return {
     id: schedule.id,
     name: schedule.name,
@@ -187,6 +228,7 @@ function scheduleToRuntime(
     routeName: route?.name ?? '巡检路线',
     mode: schedule.mode,
     enabled: Boolean(schedule.enabled),
+    status,
     scheduledAt: schedule.scheduled_at ?? undefined,
     nextRunAt: schedule.next_run_at ?? undefined,
     intervalMinutes: schedule.interval_minutes ?? undefined,
@@ -206,18 +248,17 @@ interface BackendSyncOptions {
 export function createBackendSync(options: BackendSyncOptions) {
   const { runtime, backendClient, backendError, setTaskRuns } = options
   let stopSubscription: (() => void) | undefined
+  let scheduleCreatedAt = new Map<string, number>()
 
   function updateAlarms() {
     const logs = runtime.value.logs
-    runtime.value = {
-      ...runtime.value,
-      alarms: {
-        total: logs.filter(
-          (item) => item.level === 'warn' || item.level === 'error',
-        ).length,
-        warning: logs.filter((item) => item.level === 'warn').length,
-        critical: logs.filter((item) => item.level === 'error').length,
-      },
+    // 只改 alarms 字段，不替换整个 runtime 对象
+    runtime.value.alarms = {
+      total: logs.filter(
+        (item) => item.level === 'warn' || item.level === 'error',
+      ).length,
+      warning: logs.filter((item) => item.level === 'warn').length,
+      critical: logs.filter((item) => item.level === 'error').length,
     }
   }
 
@@ -225,15 +266,18 @@ export function createBackendSync(options: BackendSyncOptions) {
     const record = backendLogToRuntime(log)
     if (runtime.value.logs.some((item) => item.id === record.id)) return
 
-    runtime.value = {
-      ...runtime.value,
-      logs: [record, ...runtime.value.logs].slice(0, 500),
+    // 原地修改 logs 数组（而不是 {...runtime, logs: [...]}）。
+    // 替换整个 runtime 会连带让地图等所有依赖它的计算属性重算、重绘，
+    // 日志一多就会明显卡顿。
+    runtime.value.logs.unshift(record)
+    if (runtime.value.logs.length > 500) {
+      runtime.value.logs.splice(500)
     }
     updateAlarms()
   }
 
   function upsertRun(run: BackendTaskRun) {
-    const record = backendRunToRuntime(run)
+    const record = backendRunToRuntime(run, scheduleCreatedAt)
     setTaskRuns([
       record,
       ...runtime.value.taskRuns.filter(
@@ -250,21 +294,29 @@ export function createBackendSync(options: BackendSyncOptions) {
       backendClient.listSchedules(),
     ])
     const routeById = new Map(routes.map((route) => [route.id, route]))
+    scheduleCreatedAt = new Map(
+      schedules.map((schedule) => [schedule.id, schedule.created_at]),
+    )
+    const firedScheduleKeys = new Set(
+      runs
+        .filter((run) => run.schedule_id && run.scheduled_for)
+        .map((run) => `${run.schedule_id}:${run.scheduled_for}`),
+    )
 
-    setTaskRuns(runs.map(backendRunToRuntime))
+    setTaskRuns(runs.map((run) => backendRunToRuntime(run, scheduleCreatedAt)))
     runtime.value = {
       ...runtime.value,
       routeTemplates: routes.map(routeToRuntime),
-      schedules: schedules
-        .filter((schedule) => Boolean(schedule.enabled))
-        .map((schedule) =>
-          scheduleToRuntime(
-            schedule,
-            schedule.route_id
-              ? routeById.get(schedule.route_id)
-              : undefined,
-          ),
+      // 计划列表包含已完成/已取消的，方便查看与重新启用
+      schedules: schedules.map((schedule) =>
+        scheduleToRuntime(
+          schedule,
+          schedule.route_id
+            ? routeById.get(schedule.route_id)
+            : undefined,
+          firedScheduleKeys,
         ),
+      ),
       logs: logs.map(backendLogToRuntime),
     }
     updateAlarms()

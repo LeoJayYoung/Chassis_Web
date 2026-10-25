@@ -180,6 +180,62 @@ function toOverviewMapSnapshot(runtime: RuntimeDashboardSnapshot): OverviewMapSn
   }
 }
 
+/**
+ * 用当前地图底图 + 指定航点，构造一个概览地图快照，用于路线模板缩略图。
+ */
+export function routeToOverviewMapSnapshot(
+  targets: RuntimeMapPoint[],
+  runtime: RuntimeDashboardSnapshot,
+): OverviewMapSnapshot {
+  const transform = toRosMapTransform(runtime.map)
+
+  return {
+    name: runtime.map.name,
+    occupancyGrid: runtime.map.occupancyGrid,
+    keepoutMask: runtime.map.keepoutMask,
+    robotVisible: false,
+    robotXPercent: 0,
+    robotYPercent: 0,
+    robotYawDeg: 0,
+    zones: runtime.map.zones.map((zone) => {
+      const canvasZone = rosRectToCanvasRect(zone, transform)
+
+      return {
+        id: zone.id,
+        xPercent: toPercent(canvasZone.x, runtime.map.width),
+        yPercent: toPercent(canvasZone.y, runtime.map.height),
+        widthPercent: toPercent(canvasZone.width, runtime.map.width),
+        heightPercent: toPercent(canvasZone.height, runtime.map.height),
+        fill: zone.fill,
+        stroke: zone.stroke,
+      }
+    }),
+    waypoints: targets.map((point, index) => {
+      const canvasPoint = rosPointToCanvasPoint(point, transform)
+
+      return {
+        id: point.id,
+        label: point.name,
+        xPercent: toPercent(canvasPoint.x, runtime.map.width),
+        yPercent: toPercent(canvasPoint.y, runtime.map.height),
+        done: false,
+        target: index === targets.length - 1,
+      }
+    }),
+    obstacles: runtime.map.obstacles.map((obstacle) => {
+      const canvasObstacle = rosRectToCanvasRect(obstacle, transform)
+
+      return {
+        id: obstacle.id,
+        xPercent: toPercent(canvasObstacle.x, runtime.map.width),
+        yPercent: toPercent(canvasObstacle.y, runtime.map.height),
+        widthPercent: toPercent(canvasObstacle.width, runtime.map.width),
+        heightPercent: toPercent(canvasObstacle.height, runtime.map.height),
+      }
+    }),
+  }
+}
+
 export function toMapDashboardSnapshot(runtime: RuntimeDashboardSnapshot): MapDashboardSnapshot {
   const transform = toRosMapTransform(runtime.map)
 

@@ -135,6 +135,34 @@ export function createApiServer({ store, bus, rosbridge, scheduler, taskService 
       return sendJson(res, 201, route)
     }
 
+    if (path.startsWith('/api/routes/') && method === 'PUT') {
+      const routeId = path.slice('/api/routes/'.length)
+      const body = await readBody(req).catch(() => null)
+      if (!body || typeof body.name !== 'string') {
+        return sendJson(res, 400, { error: '需要 name' })
+      }
+      try {
+        const renamed = store.renameRoute(routeId, body.name)
+        return renamed
+          ? sendJson(res, 200, store.getRoute(routeId))
+          : sendJson(res, 404, { error: 'not found' })
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message })
+      }
+    }
+
+    if (path.startsWith('/api/routes/') && method === 'DELETE') {
+      const routeId = path.slice('/api/routes/'.length)
+      try {
+        const deleted = store.deleteRoute(routeId)
+        return deleted
+          ? sendJson(res, 200, { deleted: true })
+          : sendJson(res, 404, { error: 'not found' })
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message })
+      }
+    }
+
     // ---------- 定时计划 ----------
     if (path === '/api/schedules' && method === 'GET') {
       return sendJson(res, 200, store.listSchedules())
@@ -160,10 +188,22 @@ export function createApiServer({ store, bus, rosbridge, scheduler, taskService 
         if (action === 'cancel') {
           return sendJson(res, 200, scheduler.cancelSchedule(scheduleId))
         }
+        if (action === 'enable') {
+          return sendJson(res, 200, scheduler.enableSchedule(scheduleId))
+        }
         if (action === 'run-now') {
           const run = scheduler.runNow(scheduleId)
           return sendJson(res, 201, store.getTaskRun(run.id))
         }
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message })
+      }
+    }
+
+    if (path.startsWith('/api/schedules/') && method === 'DELETE') {
+      const scheduleId = path.slice('/api/schedules/'.length)
+      try {
+        return sendJson(res, 200, scheduler.deleteSchedule(scheduleId))
       } catch (error) {
         return sendJson(res, 400, { error: error.message })
       }

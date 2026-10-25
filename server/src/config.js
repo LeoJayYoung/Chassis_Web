@@ -20,6 +20,10 @@ export const config = {
   dbPath: env('DB_PATH', path.join(__dirname, '..', 'data', 'chassis.db')),
   rosbridgeReconnectMs: envNumber('ROSBRIDGE_RECONNECT_MS', 1600),
   schedulerRetryMs: envNumber('SCHEDULER_RETRY_MS', 30_000),
+  // 日志保留策略：超过 N 天的日志定期清理；maxRows>0 时再按条数兜底
+  logRetentionDays: envNumber('LOG_RETENTION_DAYS', 30),
+  logMaxRows: envNumber('LOG_MAX_ROWS', 0),
+  logCleanupIntervalMs: envNumber('LOG_CLEANUP_INTERVAL_MS', 60 * 60 * 1000),
   // 日志采集 topic
   logTopics: {
     rosout: env('ROS_TOPIC_ROSOUT', '/rosout'),

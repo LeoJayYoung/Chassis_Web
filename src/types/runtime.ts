@@ -274,6 +274,7 @@ export interface RuntimeScheduleRecord {
   routeName: string
   mode: 'once' | 'interval' | 'daily'
   enabled: boolean
+  status: 'enabled' | 'canceled' | 'completed' | 'expired'
   scheduledAt?: number
   nextRunAt?: number
   intervalMinutes?: number

@@ -185,7 +185,8 @@ function movePan(event: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
 
   if (!pointer) return
 
-  if (Math.hypot(pointer.x - lastPanPoint.x, pointer.y - lastPanPoint.y) > 3) {
+  // 阈值放宽到 8px：太小的阈值会让点击时的轻微手抖被误判成拖拽，导致"点了没反应"
+  if (Math.hypot(pointer.x - lastPanPoint.x, pointer.y - lastPanPoint.y) > 8) {
     hasPanned = true
   }
 
@@ -818,7 +819,6 @@ watch(
   () => {
     buildScene()
   },
-  { deep: true },
 )
 
 onMounted(() => {

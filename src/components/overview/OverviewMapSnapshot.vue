@@ -20,6 +20,8 @@ const MIN_SCALE = 0.001
 
 const props = defineProps<{
   snapshot: OverviewMapSnapshot
+  // 为 true 时把视野收缩到航点包围盒，用于路线缩略图（自动放大到路线范围）
+  focusWaypoints?: boolean
 }>()
 
 const stageHost = ref<HTMLDivElement | null>(null)
@@ -53,15 +55,10 @@ function sceneHeight() {
   return props.snapshot.occupancyGrid?.heightCells ?? BASE_HEIGHT
 }
 
+let renderScale = 1
+
 function contentScale() {
-  if (!stageHost.value) return 1
-
-  const width = stageHost.value.clientWidth
-  const height = stageHost.value.clientHeight
-
-  if (!width || !height) return 1
-
-  return Math.max(Math.min(width / sceneWidth(), height / sceneHeight()), MIN_SCALE)
+  return renderScale
 }
 
 function visualSize(pixelSize: number) {
@@ -511,6 +508,19 @@ function drawScene() {
 
   layer.destroyChildren()
 
+  // 先按视野范围算出渲染缩放，再画（让航点/标签尺寸保持屏幕像素级一致）
+  const hostWidth = stageHost.value?.clientWidth ?? 0
+  const hostHeight = stageHost.value?.clientHeight ?? 0
+  const bounds = viewBounds()
+
+  renderScale =
+    hostWidth && hostHeight
+      ? Math.max(
+          Math.min(hostWidth / bounds.width, hostHeight / bounds.height),
+          MIN_SCALE,
+        )
+      : 1
+
   const group = new Konva.Group()
   contentGroup = group
 
@@ -545,6 +555,37 @@ function drawScene() {
   layoutStage()
 }
 
+function viewBounds() {
+  const width = sceneWidth()
+  const height = sceneHeight()
+  const whole = { x: 0, y: 0, width, height }
+
+  if (!props.focusWaypoints || props.snapshot.waypoints.length === 0) {
+    return whole
+  }
+
+  const xs = props.snapshot.waypoints.map((waypoint) => (waypoint.xPercent / 100) * width)
+  const ys = props.snapshot.waypoints.map((waypoint) => (waypoint.yPercent / 100) * height)
+  const minX = Math.min(...xs)
+  const maxX = Math.max(...xs)
+  const minY = Math.min(...ys)
+  const maxY = Math.max(...ys)
+  const centerX = (minX + maxX) / 2
+  const centerY = (minY + maxY) / 2
+  // 保证最小视野范围：单点路线也能看到周边地图，不会缩成一个点
+  const viewWidth = Math.min(width, Math.max((maxX - minX) * 1.8, width * 0.35))
+  const viewHeight = Math.min(height, Math.max((maxY - minY) * 1.8, height * 0.35))
+  const x = Math.max(0, Math.min(width - viewWidth, centerX - viewWidth / 2))
+  const y = Math.max(0, Math.min(height - viewHeight, centerY - viewHeight / 2))
+
+  return {
+    x,
+    y,
+    width: Math.max(viewWidth, 1),
+    height: Math.max(viewHeight, 1),
+  }
+}
+
 function layoutStage() {
   if (!stage || !layer || !contentGroup || !stageHost.value) return
 
@@ -555,13 +596,14 @@ function layoutStage() {
 
   stage.size({ width, height })
 
-  const scale = Math.min(width / sceneWidth(), height / sceneHeight())
-  const contentWidth = sceneWidth() * scale
-  const contentHeight = sceneHeight() * scale
+  const bounds = viewBounds()
+  const scale = renderScale
+  const contentWidth = bounds.width * scale
+  const contentHeight = bounds.height * scale
 
   contentGroup.position({
-    x: (width - contentWidth) / 2,
-    y: (height - contentHeight) / 2,
+    x: (width - contentWidth) / 2 - bounds.x * scale,
+    y: (height - contentHeight) / 2 - bounds.y * scale,
   })
   contentGroup.scale({ x: scale, y: scale })
 

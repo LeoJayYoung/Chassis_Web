@@ -380,10 +380,11 @@ export class RosbridgeRuntimeDataSource implements RuntimeDataSource {
       }
 
       socket.onclose = () => {
-        if (this.socket === socket) {
-          this.socket = null
-        }
+        // 只处理"当前连接"的断开。被 disconnect() 主动关闭、或已被新连接替换的旧 socket 直接忽略，
+        // 否则每条旧连接都会再触发一次重连，WebSocket 会越叠越多（rosbridge 的 clients 数只涨不降）。
+        if (this.socket !== socket) return
 
+        this.socket = null
         this.patchConnection('disconnected')
         this.stopSubscriptionRetry()
         this.stopLocalizationWatchdog()

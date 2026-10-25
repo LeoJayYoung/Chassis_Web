@@ -305,6 +305,34 @@ export function createScheduler({ store, bus, dispatchRoute }) {
     return { id, enabled: 0 }
   }
 
+  function enableSchedule(id) {
+    const schedule = store.listSchedules().find((item) => item.id === id)
+    if (!schedule) throw new Error(`定时计划 ${id} 不存在`)
+    if (
+      schedule.mode === 'once' &&
+      schedule.scheduled_at &&
+      schedule.scheduled_at <= Date.now()
+    ) {
+      throw new Error('一次性计划已过期，无法重新启用，请新建一条')
+    }
+
+    const nextRunAt = computeNextRun(schedule, Date.now())
+    store.updateSchedule(id, { enabled: 1, next_run_at: nextRunAt })
+    log('info', `定时计划「${schedule.name}」已重新启用`)
+    bus.emit('schedule-updated', { id })
+    return { id, enabled: 1, nextRunAt }
+  }
+
+  function deleteSchedule(id) {
+    const schedule = store.listSchedules().find((item) => item.id === id)
+    if (!schedule) throw new Error(`定时计划 ${id} 不存在`)
+
+    store.deleteSchedule(id)
+    log('warn', `定时计划「${schedule.name}」已删除`)
+    bus.emit('schedule-deleted', { id })
+    return { id, deleted: true }
+  }
+
   function runNow(id) {
     const schedule = store.listSchedules().find((item) => item.id === id)
     if (!schedule) throw new Error(`定时计划 ${id} 不存在`)
@@ -338,6 +366,8 @@ export function createScheduler({ store, bus, dispatchRoute }) {
     stop,
     addSchedule,
     cancelSchedule,
+    enableSchedule,
+    deleteSchedule,
     runNow,
     computeNextRun,
   }

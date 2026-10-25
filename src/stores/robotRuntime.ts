@@ -834,6 +834,38 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     void backendCommands?.cancelSchedule(scheduleId)
   }
 
+  function enableSchedule(scheduleId: string) {
+    void backendCommands?.enableSchedule(scheduleId)
+  }
+
+  function deleteSchedule(scheduleId: string) {
+    void backendCommands?.deleteSchedule(scheduleId)
+  }
+
+  function renameRoute(routeId: string, name: string) {
+    void backendCommands?.renameRoute(routeId, name)
+  }
+
+  function deleteRoute(routeId: string) {
+    return backendCommands?.deleteRoute(routeId) ?? null
+  }
+
+  function reuseRouteImmediately(routeId: string) {
+    void backendCommands?.reuseRouteImmediately(routeId)
+  }
+
+  async function createScheduleFromRoute(
+    routeId: string,
+    input: {
+      mode: 'once' | 'interval' | 'daily'
+      scheduledAt?: number
+      intervalMinutes?: number
+      timeOfDay?: string
+    },
+  ) {
+    return backendCommands?.createScheduleFromRoute(routeId, input) ?? null
+  }
+
   async function createRouteTemplate(name: string, targetIds: string[]) {
     if (!backendCommands) return null
 
@@ -891,7 +923,13 @@ export const useRobotRuntimeStore = defineStore('robotRuntime', () => {
     loadTaskDetail,
     runScheduleNow,
     cancelSchedule,
+    enableSchedule,
+    deleteSchedule,
     createRouteTemplate,
+    renameRoute,
+    deleteRoute,
+    reuseRouteImmediately,
+    createScheduleFromRoute,
     reorderTasks,
     startMockPoseStream: mockController.startPoseStream,
     stopMockPoseStream: mockController.stopPoseStream,
